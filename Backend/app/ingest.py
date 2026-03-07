@@ -16,12 +16,12 @@ def ingest_pdf(file_path):
 
     # Create embeddings
     embedding = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-mpnet-base-v2"
+        model_name="sentence-transformers/all-MiniLM-L6-v2"
     )
 
     # Create vector DB
     vector_store = FAISS.from_documents(splits, embedding)
 
-    vector_store.save_local("app/db")
+    vector_store.save_local("db")
 
     print("Vector is created and saved successfully")
