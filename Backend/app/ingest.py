@@ -5,6 +5,10 @@ from pymongo import MongoClient
 import os
 import logging
 from dotenv import load_dotenv
+import io
+from datetime import datetime
+import tempfile
+import uuid
 
 load_dotenv()
 
@@ -32,16 +36,35 @@ except Exception as e:
     logger.error(f"Failed to load embeddings model: {e}")
     raise
 
-def ingest_pdf(file_path):
-    """Process and store PDF in MongoDB with vector embeddings"""
+def ingest_pdf_from_bytes(pdf_bytes, filename):
+    """Process PDF from bytes and store in MongoDB with vector embeddings"""
     
-    if not os.path.exists(file_path):
-        raise FileNotFoundError(f"PDF file not found: {file_path}")
+    temp_file_path = None
     
     try:
-        # Load PDF
-        logger.info(f"Loading PDF: {file_path}")
-        loader = PyPDFLoader(file_path)
+        # Create a unique filename to avoid conflicts
+        unique_filename = f"{uuid.uuid4()}_{filename}"
+        
+        # Create temp directory if it doesn't exist
+        temp_dir = os.path.join(tempfile.gettempdir(), "pdf_processor")
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        # Create temp file path
+        temp_file_path = os.path.join(temp_dir, unique_filename)
+        
+        # Write bytes to temp file with proper permissions
+        logger.info(f"Creating temp file: {temp_file_path}")
+        with open(temp_file_path, 'wb') as f:
+            f.write(pdf_bytes)
+        
+        # Verify file was written
+        if not os.path.exists(temp_file_path):
+            raise Exception("Failed to create temp file")
+        
+        logger.info(f"Temp file created successfully, size: {os.path.getsize(temp_file_path)} bytes")
+        
+        # Load PDF using the temp file
+        loader = PyPDFLoader(temp_file_path)
         documents = loader.load()
         
         if not documents:
@@ -69,8 +92,9 @@ def ingest_pdf(file_path):
                     "text": doc.page_content,
                     "embedding": embedding,
                     "page": doc.metadata.get("page", 0),
-                    "file": os.path.basename(file_path),
-                    "chunk_id": i
+                    "file": filename,
+                    "chunk_id": i,
+                    "timestamp": datetime.utcnow()
                 })
                 success_count += 1
                 
@@ -84,3 +108,15 @@ def ingest_pdf(file_path):
     except Exception as e:
         logger.error(f"PDF ingestion failed: {e}")
         raise
+        
+    finally:
+        # Clean up temp file
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                # Make sure file is not locked before deleting
+                import time
+                time.sleep(0.1)  # Small delay to ensure file is released
+                os.remove(temp_file_path)
+                logger.info(f"Temp file deleted: {temp_file_path}")
+            except Exception as e:
+                logger.warning(f"Could not delete temp file {temp_file_path}: {e}")

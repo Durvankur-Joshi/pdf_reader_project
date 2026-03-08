@@ -1,4 +1,5 @@
 from pymongo import MongoClient
+import gridfs
 import os
 from dotenv import load_dotenv
 import logging
@@ -20,3 +21,9 @@ except Exception as e:
 
 db = client["pdf_ai"]
 collection = db["documents"]
+
+# Add GridFS for file storage
+fs = gridfs.GridFS(db)
+
+# Store file metadata
+files_collection = db["files"]
