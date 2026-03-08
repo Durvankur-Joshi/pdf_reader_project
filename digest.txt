@@ -1,0 +1,785 @@
+Directory structure:
+└── pdf_reader_project/
+    ├── Backend/
+    │   ├── rquirement.txt
+    │   ├── app/
+    │   │   ├── ingest.py
+    │   │   ├── main.py
+    │   │   ├── mongo_db.py
+    │   │   ├── query.py
+    │   │   └── vector_search.py
+    │   └── db/
+    │       ├── index.faiss
+    │       └── index.pkl
+    └── Frontend/
+        ├── README.md
+        ├── eslint.config.js
+        ├── index.html
+        ├── package.json
+        ├── postcss.config.mjs
+        ├── vite.config.js
+        └── src/
+            ├── App.css
+            ├── App.jsx
+            ├── index.css
+            ├── main.jsx
+            └── api/
+                ├── api.js
+                ├── ask.js
+                └── upload.js
+
+================================================
+FILE: Backend/rquirement.txt
+================================================
+fastapi
+uvicorn
+python-multipart
+langchain
+langchain-community
+langchain-google-genai
+google-generativeai
+pypdf
+faiss-cpu
+python-dotenv
+langchain_huggingface
+tiktoken
+
+
+================================================
+FILE: Backend/app/ingest.py
+================================================
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_huggingface import HuggingFaceEmbeddings
+from pymongo import MongoClient
+import os
+
+client = MongoClient(os.getenv("MONGO_URI"))
+db = client["pdf_ai"]
+collection = db["documents"]
+
+embeddings = HuggingFaceEmbeddings(
+    model_name="sentence-transformers/all-MiniLM-L6-v2"
+)
+
+def ingest_pdf(file_path):
+
+    loader = PyPDFLoader(file_path)
+    documents = loader.load()
+
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1000,
+        chunk_overlap=200
+    )
+
+    splits = splitter.split_documents(documents)
+
+    for doc in splits:
+
+        embedding = embeddings.embed_query(doc.page_content)
+
+        collection.insert_one({
+            "text": doc.page_content,
+            "embedding": embedding,
+            "page": doc.metadata["page"],
+            "file": file_path
+        })
+
+    print("PDF stored in MongoDB")
+
+
+================================================
+FILE: Backend/app/main.py
+================================================
+from fastapi import FastAPI, UploadFile, File
+import os
+import shutil
+from app.ingest import ingest_pdf
+from app.query import ask_question
+from pydantic import BaseModel
+from fastapi.middleware.cors import CORSMiddleware
+from app.vector_search import search_documents
+
+
+class QuestionRequest(BaseModel):
+    question: str
+
+
+app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+UPLOAD_FOLDER = "data"
+
+
+@app.get("/")
+def home():
+    return {"message": "RAG API running"}
+
+
+@app.post("/upload")
+async def upload_pdf(file: UploadFile = File(...)):
+    file_path = os.path.join(UPLOAD_FOLDER, file.filename)
+
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    ingest_pdf(file_path)
+
+    return {"message": f"File {file.filename} uploaded successfully"}
+
+
+@app.post("/ask")
+async def ask(request: QuestionRequest):
+
+    answer = ask_question(request.question)
+
+    return {
+        "question": request.question,
+        "answer": answer["answer"],
+        "sources": answer["sources"],
+    }
+
+
+@app.get("/test-search")
+def test_search(q: str):
+
+    docs = search_documents(q)
+
+    return {"results": docs}
+
+
+
+================================================
+FILE: Backend/app/mongo_db.py
+================================================
+from pymongo import MongoClient
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+MONGO_URI = os.getenv("MONGO_URI")
+
+client = MongoClient(MONGO_URI)
+
+db = client["pdf_ai"]
+
+collection = db["documents"]
+
+
+================================================
+FILE: Backend/app/query.py
+================================================
+from app.vector_search import search_documents
+from langchain_google_genai import ChatGoogleGenerativeAI
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+model = ChatGoogleGenerativeAI(
+    model="gemini-2.5-flash-lite",
+    google_api_key=os.getenv("GOOGLE_API_KEY")
+)
+
+
+def ask_question(question):
+
+    docs = search_documents(question)
+
+    context = ""
+    sources = []
+
+    for doc in docs:
+
+        context += f"\nFile {doc['file']} Page {doc['page']}:\n{doc['text']}\n"
+
+        sources.append({
+            "file": doc["file"],
+            "page": doc["page"]
+        })
+
+    prompt = f"""
+Answer using the provided context.
+
+Context:
+{context}
+
+Question: {question}
+
+Answer:
+"""
+
+    response = model.invoke(prompt)
+
+    return {
+        "answer": response.content,
+        "sources": sources
+    }
+
+
+================================================
+FILE: Backend/app/vector_search.py
+================================================
+from app.mongo_db import collection
+from langchain_huggingface import HuggingFaceEmbeddings
+
+embeddings = HuggingFaceEmbeddings(
+    model_name="sentence-transformers/all-MiniLM-L6-v2"
+)
+
+
+def search_documents(query):
+
+    query_vector = embeddings.embed_query(query)
+
+    pipeline = [
+        {
+            "$vectorSearch": {
+                "index": "vector_index",
+                "path": "embedding",
+                "queryVector": query_vector,
+                "numCandidates": 100,
+                "limit": 3
+            }
+        }
+    ]
+
+    results = collection.aggregate(pipeline)
+
+    docs = []
+
+    for r in results:
+        docs.append(r)
+
+    return docs
+
+
+================================================
+FILE: Backend/db/index.faiss
+================================================
+[Binary file]
+
+
+================================================
+FILE: Backend/db/index.pkl
+================================================
+[Binary file]
+
+
+================================================
+FILE: Frontend/README.md
+================================================
+# React + Vite
+
+This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+
+Currently, two official plugins are available:
+
+- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
+- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+
+## React Compiler
+
+The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+
+## Expanding the ESLint configuration
+
+If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+
+
+
+================================================
+FILE: Frontend/eslint.config.js
+================================================
+import js from '@eslint/js'
+import globals from 'globals'
+import reactHooks from 'eslint-plugin-react-hooks'
+import reactRefresh from 'eslint-plugin-react-refresh'
+import { defineConfig, globalIgnores } from 'eslint/config'
+
+export default defineConfig([
+  globalIgnores(['dist']),
+  {
+    files: ['**/*.{js,jsx}'],
+    extends: [
+      js.configs.recommended,
+      reactHooks.configs.flat.recommended,
+      reactRefresh.configs.vite,
+    ],
+    languageOptions: {
+      ecmaVersion: 2020,
+      globals: globals.browser,
+      parserOptions: {
+        ecmaVersion: 'latest',
+        ecmaFeatures: { jsx: true },
+        sourceType: 'module',
+      },
+    },
+    rules: {
+      'no-unused-vars': ['error', { varsIgnorePattern: '^[A-Z_]' }],
+    },
+  },
+])
+
+
+
+================================================
+FILE: Frontend/index.html
+================================================
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>frontend</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
+
+
+
+================================================
+FILE: Frontend/package.json
+================================================
+{
+  "name": "frontend",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "lint": "eslint .",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@tailwindcss/postcss": "^4.2.1",
+    "axios": "^1.13.6",
+    "lucide-react": "^0.577.0",
+    "postcss": "^8.5.8",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "tailwindcss": "^4.2.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.1",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.1",
+    "eslint": "^9.39.1",
+    "eslint-plugin-react-hooks": "^7.0.1",
+    "eslint-plugin-react-refresh": "^0.4.24",
+    "globals": "^16.5.0",
+    "vite": "^7.3.1"
+  }
+}
+
+
+
+================================================
+FILE: Frontend/postcss.config.mjs
+================================================
+export default {
+  plugins: {
+    "@tailwindcss/postcss": {},
+  }
+}
+
+
+================================================
+FILE: Frontend/vite.config.js
+================================================
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+
+// https://vite.dev/config/
+export default defineConfig({
+  plugins: [react()],
+})
+
+
+
+================================================
+FILE: Frontend/src/App.css
+================================================
+[Empty file]
+
+
+================================================
+FILE: Frontend/src/App.jsx
+================================================
+import { useState } from "react";
+import { uploadPDF } from "./api/upload";
+import { askQuestion } from "./api/ask";
+import {
+  FileText,
+  Upload,
+  MessageSquare,
+  Send,
+  CheckCircle,
+  AlertCircle,
+  Loader,
+  Sparkles
+} from 'lucide-react';
+
+function App() {
+  const [file, setFile] = useState(null);
+  const [question, setQuestion] = useState("");
+  const [answer, setAnswer] = useState("");
+  const [sources, setSources] = useState([]);
+  const [uploading, setUploading] = useState(false);
+  const [asking, setAsking] = useState(false);
+  const [uploadStatus, setUploadStatus] = useState(null);
+  const [fileName, setFileName] = useState("");
+
+  const handleFileChange = (e) => {
+    const selectedFile = e.target.files[0];
+    setFile(selectedFile);
+    setFileName(selectedFile?.name || "");
+    setUploadStatus(null);
+  };
+
+  const handleUpload = async () => {
+    if (!file) {
+      alert("Please select a file first");
+      return;
+    }
+
+    setUploading(true);
+    setUploadStatus(null);
+
+    try {
+      const res = await uploadPDF(file);
+      setUploadStatus({ success: true, message: res.message || "PDF uploaded successfully!" });
+    } catch (error) {
+      setUploadStatus({ success: false, message: error.message || "Upload failed" });
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const handleAsk = async () => {
+    if (!question.trim()) {
+      alert("Please enter a question");
+      return;
+    }
+
+    setAsking(true);
+    setAnswer("");
+    setSources([])
+
+    try {
+      const res = await askQuestion(question);
+      setAnswer(res.answer || res || "No answer received");
+      setSources(res.sources || []);
+    } catch (error) {
+      setAnswer("Error: " + (error.message || "Failed to get answer"));
+    } finally {
+      setAsking(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100">
+      {/* Header */}
+      <header className="bg-white shadow-sm border-b">
+        <div className="max-w-6xl mx-auto px-4 py-6">
+          <div className="flex items-center gap-3">
+            <div className="bg-blue-600 p-3 rounded-xl">
+              <Sparkles className="h-8 w-8 text-white" />
+            </div>
+            <div>
+              <h1 className="text-3xl font-bold text-gray-900">PDF AI Assistant</h1>
+              <p className="text-gray-600">Upload PDFs and ask questions using AI</p>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      {/* Main Content */}
+      <main className="max-w-6xl mx-auto px-4 py-8">
+        <div className="grid md:grid-cols-2 gap-8">
+          {/* Left Column - Upload Section */}
+          <div className="bg-white rounded-2xl shadow-lg p-6 border border-gray-100">
+            <div className="flex items-center gap-2 mb-6">
+              <div className="bg-blue-100 p-2 rounded-lg">
+                <FileText className="h-5 w-5 text-blue-600" />
+              </div>
+              <h2 className="text-xl font-semibold text-gray-800">Upload PDF</h2>
+            </div>
+
+            {/* Upload Area */}
+            <div className="border-2 border-dashed border-gray-300 rounded-xl p-8 text-center hover:border-blue-500 transition-colors">
+              <Upload className="h-12 w-12 text-gray-400 mx-auto mb-4" />
+
+              <label className="cursor-pointer">
+                <span className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors inline-block">
+                  Choose File
+                </span>
+                <input
+                  type="file"
+                  accept=".pdf"
+                  onChange={handleFileChange}
+                  className="hidden"
+                />
+              </label>
+
+              {fileName && (
+                <div className="mt-4 flex items-center justify-center gap-2 text-sm text-gray-600">
+                  <FileText className="h-4 w-4" />
+                  <span className="truncate max-w-[200px]">{fileName}</span>
+                </div>
+              )}
+            </div>
+
+            {/* Upload Button */}
+            <button
+              onClick={handleUpload}
+              disabled={!file || uploading}
+              className={`w-full mt-4 py-3 px-4 rounded-lg font-medium flex items-center justify-center gap-2 transition-all ${!file || uploading
+                ? "bg-gray-300 text-gray-500 cursor-not-allowed"
+                : "bg-blue-600 text-white hover:bg-blue-700 hover:shadow-lg"
+                }`}
+            >
+              {uploading ? (
+                <>
+                  <Loader className="animate-spin" size={18} />
+                  Uploading...
+                </>
+              ) : (
+                <>
+                  <Upload size={18} />
+                  Upload PDF
+                </>
+              )}
+            </button>
+
+            {/* Upload Status */}
+            {uploadStatus && (
+              <div className={`mt-4 p-4 rounded-lg flex items-start gap-3 ${uploadStatus.success ? 'bg-green-50' : 'bg-red-50'
+                }`}>
+                {uploadStatus.success ? (
+                  <CheckCircle className="h-5 w-5 text-green-600 mt-0.5" />
+                ) : (
+                  <AlertCircle className="h-5 w-5 text-red-600 mt-0.5" />
+                )}
+                <div>
+                  <p className={`font-medium ${uploadStatus.success ? 'text-green-800' : 'text-red-800'
+                    }`}>
+                    {uploadStatus.success ? 'Success!' : 'Error!'}
+                  </p>
+                  <p className={`text-sm ${uploadStatus.success ? 'text-green-600' : 'text-red-600'
+                    }`}>
+                    {uploadStatus.message}
+                  </p>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Right Column - Question Section */}
+          <div className="bg-white rounded-2xl shadow-lg p-6 border border-gray-100">
+            <div className="flex items-center gap-2 mb-6">
+              <div className="bg-purple-100 p-2 rounded-lg">
+                <MessageSquare className="h-5 w-5 text-purple-600" />
+              </div>
+              <h2 className="text-xl font-semibold text-gray-800">Ask Question</h2>
+            </div>
+
+            {/* Question Input */}
+            <div className="space-y-4">
+              <div className="relative">
+                <textarea
+                  value={question}
+                  onChange={(e) => setQuestion(e.target.value)}
+                  placeholder="Ask something about your PDF..."
+                  className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none"
+                  rows="4"
+                />
+                <div className="absolute bottom-3 right-3 text-xs text-gray-400">
+                  {question.length}/500
+                </div>
+              </div>
+
+              <button
+                onClick={handleAsk}
+                disabled={!question.trim() || asking}
+                className={`w-full py-3 px-4 rounded-lg font-medium flex items-center justify-center gap-2 transition-all ${!question.trim() || asking
+                  ? "bg-gray-300 text-gray-500 cursor-not-allowed"
+                  : "bg-purple-600 text-white hover:bg-purple-700 hover:shadow-lg"
+                  }`}
+              >
+                {asking ? (
+                  <>
+                    <Loader className="animate-spin" size={18} />
+                    Processing...
+                  </>
+                ) : (
+                  <>
+                    <Send size={18} />
+                    Ask Question
+                  </>
+                )}
+              </button>
+            </div>
+
+            {/* Answer Section */}
+
+            {/* Answer Section */}
+            {(answer || asking) && (
+              <div className="mt-6 border-t pt-6">
+                <h3 className="text-lg font-semibold text-gray-800 mb-3 flex items-center gap-2">
+                  <Sparkles className="h-5 w-5 text-purple-600" />
+                  Answer
+                </h3>
+
+                <div className="bg-gray-50 rounded-lg p-4 min-h-[100px] mb-4">
+                  {asking ? (
+                    <div className="flex items-center justify-center h-full">
+                      <div className="text-center">
+                        <Loader className="animate-spin h-8 w-8 text-purple-600 mx-auto mb-2" />
+                        <p className="text-gray-500">Getting answer...</p>
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="text-gray-700 whitespace-pre-wrap">{answer}</p>
+                  )}
+                </div>
+
+                {/* Sources Section */}
+                {sources && sources.length > 0 && (
+                  <div className="bg-blue-50 rounded-lg p-4">
+                    <h4 className="text-sm font-semibold text-blue-800 mb-2 flex items-center gap-2">
+                      <span className="bg-blue-200 text-blue-800 rounded-full w-5 h-5 flex items-center justify-center text-xs">
+                        ðŸ“„
+                      </span>
+                      Sources Used
+                    </h4>
+                    <div className="flex flex-wrap gap-2">
+                      {sources.map((s, i) => (
+                        <span
+                          key={i}
+                          className="bg-white text-blue-700 px-3 py-1 rounded-full text-xs font-medium border border-blue-200 shadow-sm"
+                        >
+                          Page {s}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div className="mt-8 text-center text-sm text-gray-500">
+          Powered by AI â€¢ Upload PDF and ask questions about its content
+        </div>
+      </main>
+    </div>
+  );
+}
+
+export default App;
+
+
+================================================
+FILE: Frontend/src/index.css
+================================================
+
+@import "tailwindcss";
+
+@layer base {
+  body {
+    @apply antialiased;
+  }
+}
+
+@layer components {
+  .btn-primary {
+    @apply bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors;
+  }
+  
+  .btn-secondary {
+    @apply bg-gray-200 text-gray-800 px-4 py-2 rounded-lg hover:bg-gray-300 transition-colors;
+  }
+  
+  .input-field {
+    @apply w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent;
+  }
+}
+
+
+================================================
+FILE: Frontend/src/main.jsx
+================================================
+import { StrictMode } from 'react'
+import { createRoot } from 'react-dom/client'
+import './index.css'
+import App from './App.jsx'
+
+createRoot(document.getElementById('root')).render(
+  <StrictMode>
+    <App />
+  </StrictMode>,
+)
+
+
+
+================================================
+FILE: Frontend/src/api/api.js
+================================================
+import axios from 'axios';
+
+const API = axios.create({
+    baseURL: 'http://127.0.0.1:8000',
+})
+
+
+export default API;
+
+
+================================================
+FILE: Frontend/src/api/ask.js
+================================================
+import API from "./api";
+
+export const askQuestion = async (question) =>{
+    const res = await API.post('/ask', { 
+        question : question
+     })
+    return res.data;
+}
+
+
+================================================
+FILE: Frontend/src/api/upload.js
+================================================
+import API from "./api";
+
+export const uploadPDF = async (file) =>{
+    const formData = new FormData();
+    formData.append('file',file)
+
+    const res = await API.post('/upload',formData,{
+        headers:{
+            "Content-Type":"multipart/form-data"
+        }
+    })
+    return res.data;
+}
+
+
+

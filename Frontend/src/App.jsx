@@ -9,13 +9,15 @@ import {
   CheckCircle,
   AlertCircle,
   Loader,
-  Sparkles
+  Sparkles,
+  BookOpen
 } from 'lucide-react';
 
 function App() {
   const [file, setFile] = useState(null);
   const [question, setQuestion] = useState("");
   const [answer, setAnswer] = useState("");
+  const [sources, setSources] = useState([]);
   const [uploading, setUploading] = useState(false);
   const [asking, setAsking] = useState(false);
   const [uploadStatus, setUploadStatus] = useState(null);
@@ -23,6 +25,21 @@ function App() {
 
   const handleFileChange = (e) => {
     const selectedFile = e.target.files[0];
+    
+    // Validate file type
+    if (selectedFile && !selectedFile.name.toLowerCase().endsWith('.pdf')) {
+      alert('Please select a PDF file');
+      e.target.value = ''; // Clear the input
+      return;
+    }
+    
+    // Validate file size (max 10MB)
+    if (selectedFile && selectedFile.size > 10 * 1024 * 1024) {
+      alert('File size too large. Maximum size is 10MB');
+      e.target.value = '';
+      return;
+    }
+    
     setFile(selectedFile);
     setFileName(selectedFile?.name || "");
     setUploadStatus(null);
@@ -39,9 +56,20 @@ function App() {
 
     try {
       const res = await uploadPDF(file);
-      setUploadStatus({ success: true, message: res.message || "PDF uploaded successfully!" });
+      setUploadStatus({ 
+        success: true, 
+        message: res.message || "PDF uploaded successfully!" 
+      });
+      // Clear the file input after successful upload
+      setFile(null);
+      setFileName("");
+      // Reset file input
+      document.querySelector('input[type="file"]').value = '';
     } catch (error) {
-      setUploadStatus({ success: false, message: error.message || "Upload failed" });
+      setUploadStatus({ 
+        success: false, 
+        message: error.message || "Upload failed" 
+      });
     } finally {
       setUploading(false);
     }
@@ -55,14 +83,25 @@ function App() {
 
     setAsking(true);
     setAnswer("");
+    setSources([]);
 
     try {
       const res = await askQuestion(question);
-      setAnswer(res.answer || res || "No answer received");
+      setAnswer(res.answer || "No answer received");
+      setSources(res.sources || []);
     } catch (error) {
       setAnswer("Error: " + (error.message || "Failed to get answer"));
+      setSources([]);
     } finally {
       setAsking(false);
+    }
+  };
+
+  // Handle Enter key press (Shift+Enter for new line, Enter to submit)
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleAsk();
     }
   };
 
@@ -117,16 +156,19 @@ function App() {
                   <span className="truncate max-w-[200px]">{fileName}</span>
                 </div>
               )}
+              
+              <p className="text-xs text-gray-400 mt-2">Maximum file size: 10MB</p>
             </div>
 
             {/* Upload Button */}
             <button
               onClick={handleUpload}
               disabled={!file || uploading}
-              className={`w-full mt-4 py-3 px-4 rounded-lg font-medium flex items-center justify-center gap-2 transition-all ${!file || uploading
-                ? "bg-gray-300 text-gray-500 cursor-not-allowed"
-                : "bg-blue-600 text-white hover:bg-blue-700 hover:shadow-lg"
-                }`}
+              className={`w-full mt-4 py-3 px-4 rounded-lg font-medium flex items-center justify-center gap-2 transition-all ${
+                !file || uploading
+                  ? "bg-gray-300 text-gray-500 cursor-not-allowed"
+                  : "bg-blue-600 text-white hover:bg-blue-700 hover:shadow-lg"
+              }`}
             >
               {uploading ? (
                 <>
@@ -143,20 +185,23 @@ function App() {
 
             {/* Upload Status */}
             {uploadStatus && (
-              <div className={`mt-4 p-4 rounded-lg flex items-start gap-3 ${uploadStatus.success ? 'bg-green-50' : 'bg-red-50'
-                }`}>
+              <div className={`mt-4 p-4 rounded-lg flex items-start gap-3 ${
+                uploadStatus.success ? 'bg-green-50' : 'bg-red-50'
+              }`}>
                 {uploadStatus.success ? (
-                  <CheckCircle className="h-5 w-5 text-green-600 mt-0.5" />
+                  <CheckCircle className="h-5 w-5 text-green-600 mt-0.5 flex-shrink-0" />
                 ) : (
-                  <AlertCircle className="h-5 w-5 text-red-600 mt-0.5" />
+                  <AlertCircle className="h-5 w-5 text-red-600 mt-0.5 flex-shrink-0" />
                 )}
                 <div>
-                  <p className={`font-medium ${uploadStatus.success ? 'text-green-800' : 'text-red-800'
-                    }`}>
+                  <p className={`font-medium ${
+                    uploadStatus.success ? 'text-green-800' : 'text-red-800'
+                  }`}>
                     {uploadStatus.success ? 'Success!' : 'Error!'}
                   </p>
-                  <p className={`text-sm ${uploadStatus.success ? 'text-green-600' : 'text-red-600'
-                    }`}>
+                  <p className={`text-sm ${
+                    uploadStatus.success ? 'text-green-600' : 'text-red-600'
+                  }`}>
                     {uploadStatus.message}
                   </p>
                 </div>
@@ -178,8 +223,14 @@ function App() {
               <div className="relative">
                 <textarea
                   value={question}
-                  onChange={(e) => setQuestion(e.target.value)}
-                  placeholder="Ask something about your PDF..."
+                  onChange={(e) => {
+                    // Limit to 500 characters
+                    if (e.target.value.length <= 500) {
+                      setQuestion(e.target.value);
+                    }
+                  }}
+                  onKeyDown={handleKeyDown}
+                  placeholder="Ask something about your PDF... (Press Enter to submit, Shift+Enter for new line)"
                   className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none"
                   rows="4"
                 />
@@ -191,10 +242,11 @@ function App() {
               <button
                 onClick={handleAsk}
                 disabled={!question.trim() || asking}
-                className={`w-full py-3 px-4 rounded-lg font-medium flex items-center justify-center gap-2 transition-all ${!question.trim() || asking
-                  ? "bg-gray-300 text-gray-500 cursor-not-allowed"
-                  : "bg-purple-600 text-white hover:bg-purple-700 hover:shadow-lg"
-                  }`}
+                className={`w-full py-3 px-4 rounded-lg font-medium flex items-center justify-center gap-2 transition-all ${
+                  !question.trim() || asking
+                    ? "bg-gray-300 text-gray-500 cursor-not-allowed"
+                    : "bg-purple-600 text-white hover:bg-purple-700 hover:shadow-lg"
+                }`}
               >
                 {asking ? (
                   <>
@@ -211,14 +263,14 @@ function App() {
             </div>
 
             {/* Answer Section */}
-            {(answer || asking) && (
+            {(answer || asking || sources.length > 0) && (
               <div className="mt-6 border-t pt-6">
                 <h3 className="text-lg font-semibold text-gray-800 mb-3 flex items-center gap-2">
                   <Sparkles className="h-5 w-5 text-purple-600" />
                   Answer
                 </h3>
 
-                <div className="bg-gray-50 rounded-lg p-4 min-h-[100px]">
+                <div className="bg-gray-50 rounded-lg p-4 min-h-[100px] mb-4">
                   {asking ? (
                     <div className="flex items-center justify-center h-full">
                       <div className="text-center">
@@ -227,9 +279,36 @@ function App() {
                       </div>
                     </div>
                   ) : (
-                    <p className="text-gray-700 whitespace-pre-wrap">{answer}</p>
+                    <p className="text-gray-700 whitespace-pre-wrap">
+                      {answer || "No answer yet. Ask a question above!"}
+                    </p>
                   )}
                 </div>
+
+                {/* Sources Section - FIXED */}
+                {sources && sources.length > 0 && (
+                  <div className="bg-blue-50 rounded-lg p-4">
+                    <h4 className="text-sm font-semibold text-blue-800 mb-2 flex items-center gap-2">
+                      <BookOpen className="h-4 w-4" />
+                      Sources Used
+                    </h4>
+                    <div className="flex flex-wrap gap-2">
+                      {sources.map((source, index) => (
+                        <span
+                          key={index}
+                          className="bg-white text-blue-700 px-3 py-1 rounded-full text-xs font-medium border border-blue-200 shadow-sm flex items-center gap-1"
+                        >
+                          <FileText className="h-3 w-3" />
+                          {/* FIXED: Display page number correctly */}
+                          Page {source.page || 'N/A'}
+                          {source.file && (
+                            <span className="text-blue-400">• {source.file.split('/').pop()}</span>
+                          )}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </div>
