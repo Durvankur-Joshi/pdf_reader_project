@@ -36,7 +36,7 @@ except Exception as e:
     logger.error(f"Failed to load embeddings model: {e}")
     raise
 
-def ingest_pdf_from_bytes(pdf_bytes, filename):
+def ingest_pdf_from_bytes(pdf_bytes, filename, user_id):
     """Process PDF from bytes and store in MongoDB with vector embeddings"""
     
     temp_file_path = None
@@ -80,19 +80,20 @@ def ingest_pdf_from_bytes(pdf_bytes, filename):
         splits = splitter.split_documents(documents)
         logger.info(f"Created {len(splits)} text chunks")
 
-        # Store in MongoDB with embeddings
+        # Store in MongoDB with embeddings and user_id
         success_count = 0
         for i, doc in enumerate(splits):
             try:
                 # Generate embedding
                 embedding = embeddings.embed_query(doc.page_content)
                 
-                # Store in MongoDB
+                # Store in MongoDB with user_id
                 collection.insert_one({
                     "text": doc.page_content,
                     "embedding": embedding,
                     "page": doc.metadata.get("page", 0),
                     "file": filename,
+                    "user_id": user_id,
                     "chunk_id": i,
                     "timestamp": datetime.utcnow()
                 })

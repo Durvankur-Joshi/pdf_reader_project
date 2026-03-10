@@ -1,4 +1,4 @@
-from pymongo import MongoClient
+from pymongo import MongoClient, ASCENDING
 import gridfs
 import os
 from dotenv import load_dotenv
@@ -21,9 +21,13 @@ except Exception as e:
 
 db = client["pdf_ai"]
 collection = db["documents"]
+users_collection = db["users"]
+files_collection = db["files"]
+
+# Create indexes
+users_collection.create_index([("email", ASCENDING)], unique=True)
+files_collection.create_index([("user_id", ASCENDING), ("filename", ASCENDING)])
+collection.create_index([("user_id", ASCENDING), ("file", ASCENDING)])
 
 # Add GridFS for file storage
 fs = gridfs.GridFS(db)
-
-# Store file metadata
-files_collection = db["files"]

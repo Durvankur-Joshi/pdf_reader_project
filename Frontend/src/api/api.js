@@ -15,6 +15,13 @@ API.interceptors.response.use(
             console.error('Network error - backend not reachable');
             return Promise.reject(new Error('Cannot connect to server. Make sure backend is running.'));
         }
+        // Handle 401 Unauthorized - token expired or invalid
+        if (error.response?.status === 401) {
+            // Clear token and redirect to login
+            localStorage.removeItem('token');
+            delete API.defaults.headers.common['Authorization'];
+            window.location.href = '/login';
+        }
         return Promise.reject(error);
     }
 );

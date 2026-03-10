@@ -10,3 +10,8 @@ faiss-cpu
 python-dotenv
 langchain_huggingface
 tiktoken
+passlib[argon2]
+python-jose[cryptography]
+pymongo
+bcrypt
+argon2-cffi

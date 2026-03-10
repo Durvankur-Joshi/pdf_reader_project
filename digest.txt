@@ -1,7 +1,7 @@
 Directory structure:
 └── pdf_reader_project/
     ├── Backend/
-    │   ├── rquirement.txt
+    │   ├── requirements.txt
     │   ├── app/
     │   │   ├── ingest.py
     │   │   ├── main.py
@@ -29,7 +29,7 @@ Directory structure:
                 └── upload.js
 
 ================================================
-FILE: Backend/rquirement.txt
+FILE: Backend/requirements.txt
 ================================================
 fastapi
 uvicorn
@@ -53,59 +53,164 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from pymongo import MongoClient
 import os
+import logging
+from dotenv import load_dotenv
+import io
+from datetime import datetime
+import tempfile
+import uuid
 
-client = MongoClient(os.getenv("MONGO_URI"))
-db = client["pdf_ai"]
-collection = db["documents"]
+load_dotenv()
 
-embeddings = HuggingFaceEmbeddings(
-    model_name="sentence-transformers/all-MiniLM-L6-v2"
-)
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-def ingest_pdf(file_path):
+# MongoDB connection
+try:
+    client = MongoClient(os.getenv("MONGO_URI"))
+    db = client["pdf_ai"]
+    collection = db["documents"]
+    logger.info("Connected to MongoDB")
+except Exception as e:
+    logger.error(f"MongoDB connection failed: {e}")
+    raise
 
-    loader = PyPDFLoader(file_path)
-    documents = loader.load()
-
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200
+# Initialize embeddings
+try:
+    embeddings = HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2"
     )
+    logger.info("Embeddings model loaded successfully")
+except Exception as e:
+    logger.error(f"Failed to load embeddings model: {e}")
+    raise
 
-    splits = splitter.split_documents(documents)
+def ingest_pdf_from_bytes(pdf_bytes, filename):
+    """Process PDF from bytes and store in MongoDB with vector embeddings"""
+    
+    temp_file_path = None
+    
+    try:
+        # Create a unique filename to avoid conflicts
+        unique_filename = f"{uuid.uuid4()}_{filename}"
+        
+        # Create temp directory if it doesn't exist
+        temp_dir = os.path.join(tempfile.gettempdir(), "pdf_processor")
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        # Create temp file path
+        temp_file_path = os.path.join(temp_dir, unique_filename)
+        
+        # Write bytes to temp file with proper permissions
+        logger.info(f"Creating temp file: {temp_file_path}")
+        with open(temp_file_path, 'wb') as f:
+            f.write(pdf_bytes)
+        
+        # Verify file was written
+        if not os.path.exists(temp_file_path):
+            raise Exception("Failed to create temp file")
+        
+        logger.info(f"Temp file created successfully, size: {os.path.getsize(temp_file_path)} bytes")
+        
+        # Load PDF using the temp file
+        loader = PyPDFLoader(temp_file_path)
+        documents = loader.load()
+        
+        if not documents:
+            raise ValueError("No content extracted from PDF")
+        
+        logger.info(f"Loaded {len(documents)} pages from PDF")
 
-    for doc in splits:
+        # Split documents into chunks
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000,
+            chunk_overlap=200
+        )
+        splits = splitter.split_documents(documents)
+        logger.info(f"Created {len(splits)} text chunks")
 
-        embedding = embeddings.embed_query(doc.page_content)
+        # Store in MongoDB with embeddings
+        success_count = 0
+        for i, doc in enumerate(splits):
+            try:
+                # Generate embedding
+                embedding = embeddings.embed_query(doc.page_content)
+                
+                # Store in MongoDB
+                collection.insert_one({
+                    "text": doc.page_content,
+                    "embedding": embedding,
+                    "page": doc.metadata.get("page", 0),
+                    "file": filename,
+                    "chunk_id": i,
+                    "timestamp": datetime.utcnow()
+                })
+                success_count += 1
+                
+            except Exception as e:
+                logger.error(f"Failed to store chunk {i}: {e}")
+                continue
 
-        collection.insert_one({
-            "text": doc.page_content,
-            "embedding": embedding,
-            "page": doc.metadata["page"],
-            "file": file_path
-        })
-
-    print("PDF stored in MongoDB")
+        logger.info(f"Successfully stored {success_count}/{len(splits)} chunks in MongoDB")
+        return {"success": True, "chunks_stored": success_count}
+        
+    except Exception as e:
+        logger.error(f"PDF ingestion failed: {e}")
+        raise
+        
+    finally:
+        # Clean up temp file
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                # Make sure file is not locked before deleting
+                import time
+                time.sleep(0.1)  # Small delay to ensure file is released
+                os.remove(temp_file_path)
+                logger.info(f"Temp file deleted: {temp_file_path}")
+            except Exception as e:
+                logger.warning(f"Could not delete temp file {temp_file_path}: {e}")
 
 
 ================================================
 FILE: Backend/app/main.py
 ================================================
-from fastapi import FastAPI, UploadFile, File
-import os
-import shutil
-from app.ingest import ingest_pdf
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from app.ingest import ingest_pdf_from_bytes
 from app.query import ask_question
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from app.vector_search import search_documents
+import logging
+from typing import Optional, List
+from datetime import datetime
+import gridfs
+from app.mongo_db import db
 
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Initialize GridFS
+fs = gridfs.GridFS(db)
+files_collection = db["files"]
 
 class QuestionRequest(BaseModel):
     question: str
 
+class Source(BaseModel):
+    file: str
+    page: int
+    score: Optional[float] = None
 
-app = FastAPI()
+class AnswerResponse(BaseModel):
+    question: str
+    answer: str
+    sources: List[Source]
+
+app = FastAPI(title="PDF RAG API", description="Upload PDFs and ask questions about them")
+
+# Configure CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -114,63 +219,203 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-UPLOAD_FOLDER = "data"
-
-
 @app.get("/")
 def home():
-    return {"message": "RAG API running"}
-
+    return {"message": "RAG API running", "status": "healthy"}
 
 @app.post("/upload")
 async def upload_pdf(file: UploadFile = File(...)):
-    file_path = os.path.join(UPLOAD_FOLDER, file.filename)
+    """Upload and process a PDF file - stores in MongoDB only"""
+    
+    # Validate file type
+    if not file.filename.endswith('.pdf'):
+        raise HTTPException(status_code=400, detail="Only PDF files are allowed")
+    
+    try:
+        # Read file content
+        pdf_bytes = await file.read()
+        
+        # Store original PDF in GridFS (optional - if you want to keep the original)
+        file_id = fs.put(
+            pdf_bytes, 
+            filename=file.filename,
+            uploadDate=datetime.utcnow(),
+            contentType="application/pdf"
+        )
+        
+        # Store file metadata
+        files_collection.insert_one({
+            "file_id": file_id,
+            "filename": file.filename,
+            "upload_date": datetime.utcnow(),
+            "size": len(pdf_bytes)
+        })
+        
+        logger.info(f"PDF stored in GridFS with ID: {file_id}")
+        
+        # Process PDF content directly from bytes
+        result = ingest_pdf_from_bytes(pdf_bytes, file.filename)
+        
+        return {
+            "message": f"File {file.filename} uploaded and processed successfully",
+            "chunks_stored": result.get("chunks_stored", 0),
+            "filename": file.filename,
+            "file_id": str(file_id)
+        }
+        
+    except Exception as e:
+        logger.error(f"Upload failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+@app.get("/files")
+async def list_files():
+    """List all uploaded PDFs"""
+    try:
+        files = files_collection.find({}, {"filename": 1, "upload_date": 1, "size": 1})
+        return {
+            "files": [
+                {
+                    "filename": f["filename"],
+                    "upload_date": f["upload_date"],
+                    "size": f.get("size", 0)
+                }
+                for f in files
+            ]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-    ingest_pdf(file_path)
+@app.get("/file/{filename}")
+async def get_file_info(filename: str):
+    """Get information about a specific file"""
+    try:
+        file_info = files_collection.find_one({"filename": filename})
+        if not file_info:
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        return {
+            "filename": file_info["filename"],
+            "upload_date": file_info["upload_date"],
+            "size": file_info.get("size", 0)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-    return {"message": f"File {file.filename} uploaded successfully"}
-
-
-@app.post("/ask")
+@app.post("/ask", response_model=AnswerResponse)
 async def ask(request: QuestionRequest):
-
-    answer = ask_question(request.question)
-
-    return {
-        "question": request.question,
-        "answer": answer["answer"],
-        "sources": answer["sources"],
-    }
-
+    """Ask a question about uploaded PDFs"""
+    
+    if not request.question or not request.question.strip():
+        raise HTTPException(status_code=400, detail="Question cannot be empty")
+    
+    try:
+        answer = ask_question(request.question)
+        
+        return {
+            "question": request.question,
+            "answer": answer["answer"],
+            "sources": [
+                Source(file=s["file"], page=s["page"], score=s.get("score"))
+                for s in answer["sources"]
+            ]
+        }
+        
+    except Exception as e:
+        logger.error(f"Question answering failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/test-search")
-def test_search(q: str):
+def test_search(q: str, limit: int = 3):
+    """Test vector search functionality"""
+    try:
+        docs = search_documents(q, limit)
+        return {"results": docs}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-    docs = search_documents(q)
+@app.get("/health")
+def health_check():
+    """Health check endpoint"""
+    return {
+        "status": "healthy",
+        "mongodb": check_mongodb_connection(),
+        "gridfs": check_gridfs()
+    }
 
-    return {"results": docs}
+def check_mongodb_connection():
+    """Check MongoDB connection"""
+    try:
+        from app.mongo_db import client
+        client.admin.command('ping')
+        return True
+    except:
+        return False
 
+def check_gridfs():
+    """Check GridFS is working"""
+    try:
+        # Try to list files
+        list(fs.find().limit(1))
+        return True
+    except:
+        return False
+
+# Add cleanup endpoint (optional)
+@app.delete("/cleanup/{filename}")
+async def cleanup_file(filename: str):
+    """Delete a file and its chunks from MongoDB"""
+    try:
+        # Find file in GridFS
+        gridfs_file = fs.find_one({"filename": filename})
+        if gridfs_file:
+            # Delete from GridFS
+            fs.delete(gridfs_file._id)
+            
+            # Delete metadata
+            files_collection.delete_one({"filename": filename})
+            
+            # Delete all document chunks
+            collection.delete_many({"file": filename})
+            
+            return {"message": f"File {filename} and its data cleaned up successfully"}
+        else:
+            raise HTTPException(status_code=404, detail="File not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 ================================================
 FILE: Backend/app/mongo_db.py
 ================================================
 from pymongo import MongoClient
+import gridfs
 import os
 from dotenv import load_dotenv
+import logging
 
 load_dotenv()
 
 MONGO_URI = os.getenv("MONGO_URI")
+if not MONGO_URI:
+    raise ValueError("MONGO_URI not found in environment variables")
 
-client = MongoClient(MONGO_URI)
+try:
+    client = MongoClient(MONGO_URI)
+    # Test connection
+    client.admin.command('ping')
+    logging.info("Connected to MongoDB successfully")
+except Exception as e:
+    logging.error(f"Failed to connect to MongoDB: {e}")
+    raise
 
 db = client["pdf_ai"]
-
 collection = db["documents"]
+
+# Add GridFS for file storage
+fs = gridfs.GridFS(db)
+
+# Store file metadata
+files_collection = db["files"]
 
 
 ================================================
@@ -180,48 +425,84 @@ from app.vector_search import search_documents
 from langchain_google_genai import ChatGoogleGenerativeAI
 import os
 from dotenv import load_dotenv
+import logging
 
 load_dotenv()
+logger = logging.getLogger(__name__)
 
-model = ChatGoogleGenerativeAI(
-    model="gemini-2.5-flash-lite",
-    google_api_key=os.getenv("GOOGLE_API_KEY")
-)
-
+# Initialize Gemini model
+try:
+    model = ChatGoogleGenerativeAI(
+        model="gemini-2.5-flash",  
+        google_api_key=os.getenv("GOOGLE_API_KEY"),
+        temperature=0.3,
+        max_tokens=500
+    )
+    logger.info("Gemini model initialized successfully")
+except Exception as e:
+    logger.error(f"Failed to initialize Gemini model: {e}")
+    model = None
 
 def ask_question(question):
-
-    docs = search_documents(question)
-
-    context = ""
-    sources = []
-
-    for doc in docs:
-
-        context += f"\nFile {doc['file']} Page {doc['page']}:\n{doc['text']}\n"
-
-        sources.append({
-            "file": doc["file"],
-            "page": doc["page"]
-        })
-
-    prompt = f"""
-Answer using the provided context.
-
+    """Answer question using RAG pipeline"""
+    
+    if not model:
+        return {
+            "answer": "AI model not available. Please check your Google API key.",
+            "sources": []
+        }
+    
+    try:
+        # Search for relevant documents
+        docs = search_documents(question)
+        
+        if not docs:
+            return {
+                "answer": "No relevant documents found. Please upload a PDF first.",
+                "sources": []
+            }
+        
+        # Prepare context
+        context = ""
+        sources = []
+        
+        for doc in docs:
+            context += f"\nFrom {doc['file']} (Page {doc['page']}):\n{doc['text']}\n"
+            sources.append({
+                "file": doc["file"],
+                "page": doc["page"],
+                "score": doc.get("score")
+            })
+        
+        # Create prompt
+        prompt = f"""You are a helpful assistant that answers questions based on the provided context.
+        
 Context:
 {context}
 
 Question: {question}
 
-Answer:
-"""
+Instructions:
+1. Answer based only on the provided context
+2. If the answer isn't in the context, say "I cannot find this information in the provided documents"
+3. Be concise and accurate
 
-    response = model.invoke(prompt)
+Answer:"""
 
-    return {
-        "answer": response.content,
-        "sources": sources
-    }
+        # Get response from Gemini
+        response = model.invoke(prompt)
+        
+        return {
+            "answer": response.content,
+            "sources": sources
+        }
+        
+    except Exception as e:
+        logger.error(f"Question answering failed: {e}")
+        return {
+            "answer": f"Error processing question: {str(e)}",
+            "sources": []
+        }
 
 
 ================================================
@@ -229,36 +510,89 @@ FILE: Backend/app/vector_search.py
 ================================================
 from app.mongo_db import collection
 from langchain_huggingface import HuggingFaceEmbeddings
+import logging
 
-embeddings = HuggingFaceEmbeddings(
-    model_name="sentence-transformers/all-MiniLM-L6-v2"
-)
+logger = logging.getLogger(__name__)
 
+try:
+    embeddings = HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2"
+    )
+except Exception as e:
+    logger.error(f"Failed to load embeddings: {e}")
+    raise
 
-def search_documents(query):
-
-    query_vector = embeddings.embed_query(query)
-
-    pipeline = [
-        {
-            "$vectorSearch": {
-                "index": "vector_index",
-                "path": "embedding",
-                "queryVector": query_vector,
-                "numCandidates": 100,
-                "limit": 3
+def search_documents(query, limit=3):
+    """Search for relevant documents using vector similarity"""
+    
+    if not query or not query.strip():
+        raise ValueError("Query cannot be empty")
+    
+    try:
+        # Generate query embedding
+        query_vector = embeddings.embed_query(query)
+        
+        # MongoDB vector search pipeline
+        pipeline = [
+            {
+                "$vectorSearch": {
+                    "index": "vector_index",  # Make sure this index exists in MongoDB
+                    "path": "embedding",
+                    "queryVector": query_vector,
+                    "numCandidates": 100,
+                    "limit": limit
+                }
+            },
+            {
+                "$project": {
+                    "text": 1,
+                    "page": 1,
+                    "file": 1,
+                    "score": {"$meta": "vectorSearchScore"}
+                }
             }
-        }
-    ]
+        ]
+        
+        # Execute search
+        results = collection.aggregate(pipeline)
+        
+        # Process results
+        docs = []
+        for r in results:
+            docs.append({
+                "text": r.get("text", ""),
+                "page": r.get("page", 0),
+                "file": r.get("file", "unknown"),
+                "score": r.get("score", 0)
+            })
+        
+        logger.info(f"Found {len(docs)} relevant documents for query")
+        return docs
+        
+    except Exception as e:
+        logger.error(f"Vector search failed: {e}")
+        # Fallback to text search if vector search fails
+        return fallback_text_search(query, limit)
 
-    results = collection.aggregate(pipeline)
-
-    docs = []
-
-    for r in results:
-        docs.append(r)
-
-    return docs
+def fallback_text_search(query, limit=3):
+    """Fallback text search if vector search fails"""
+    try:
+        results = collection.find(
+            {"text": {"$regex": query, "$options": "i"}}
+        ).limit(limit)
+        
+        docs = []
+        for r in results:
+            docs.append({
+                "text": r.get("text", ""),
+                "page": r.get("page", 0),
+                "file": r.get("file", "unknown")
+            })
+        
+        return docs
+    except Exception as e:
+        logger.error(f"Fallback search failed: {e}")
+        return []
 
 
 ================================================
@@ -430,7 +764,8 @@ import {
   CheckCircle,
   AlertCircle,
   Loader,
-  Sparkles
+  Sparkles,
+  BookOpen
 } from 'lucide-react';
 
 function App() {
@@ -445,6 +780,21 @@ function App() {
 
   const handleFileChange = (e) => {
     const selectedFile = e.target.files[0];
+    
+    // Validate file type
+    if (selectedFile && !selectedFile.name.toLowerCase().endsWith('.pdf')) {
+      alert('Please select a PDF file');
+      e.target.value = ''; // Clear the input
+      return;
+    }
+    
+    // Validate file size (max 10MB)
+    if (selectedFile && selectedFile.size > 10 * 1024 * 1024) {
+      alert('File size too large. Maximum size is 10MB');
+      e.target.value = '';
+      return;
+    }
+    
     setFile(selectedFile);
     setFileName(selectedFile?.name || "");
     setUploadStatus(null);
@@ -461,9 +811,20 @@ function App() {
 
     try {
       const res = await uploadPDF(file);
-      setUploadStatus({ success: true, message: res.message || "PDF uploaded successfully!" });
+      setUploadStatus({ 
+        success: true, 
+        message: res.message || "PDF uploaded successfully!" 
+      });
+      // Clear the file input after successful upload
+      setFile(null);
+      setFileName("");
+      // Reset file input
+      document.querySelector('input[type="file"]').value = '';
     } catch (error) {
-      setUploadStatus({ success: false, message: error.message || "Upload failed" });
+      setUploadStatus({ 
+        success: false, 
+        message: error.message || "Upload failed" 
+      });
     } finally {
       setUploading(false);
     }
@@ -477,16 +838,25 @@ function App() {
 
     setAsking(true);
     setAnswer("");
-    setSources([])
+    setSources([]);
 
     try {
       const res = await askQuestion(question);
-      setAnswer(res.answer || res || "No answer received");
+      setAnswer(res.answer || "No answer received");
       setSources(res.sources || []);
     } catch (error) {
       setAnswer("Error: " + (error.message || "Failed to get answer"));
+      setSources([]);
     } finally {
       setAsking(false);
+    }
+  };
+
+  // Handle Enter key press (Shift+Enter for new line, Enter to submit)
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleAsk();
     }
   };
 
@@ -541,16 +911,19 @@ function App() {
                   <span className="truncate max-w-[200px]">{fileName}</span>
                 </div>
               )}
+              
+              <p className="text-xs text-gray-400 mt-2">Maximum file size: 10MB</p>
             </div>
 
             {/* Upload Button */}
             <button
               onClick={handleUpload}
               disabled={!file || uploading}
-              className={`w-full mt-4 py-3 px-4 rounded-lg font-medium flex items-center justify-center gap-2 transition-all ${!file || uploading
-                ? "bg-gray-300 text-gray-500 cursor-not-allowed"
-                : "bg-blue-600 text-white hover:bg-blue-700 hover:shadow-lg"
-                }`}
+              className={`w-full mt-4 py-3 px-4 rounded-lg font-medium flex items-center justify-center gap-2 transition-all ${
+                !file || uploading
+                  ? "bg-gray-300 text-gray-500 cursor-not-allowed"
+                  : "bg-blue-600 text-white hover:bg-blue-700 hover:shadow-lg"
+              }`}
             >
               {uploading ? (
                 <>
@@ -567,20 +940,23 @@ function App() {
 
             {/* Upload Status */}
             {uploadStatus && (
-              <div className={`mt-4 p-4 rounded-lg flex items-start gap-3 ${uploadStatus.success ? 'bg-green-50' : 'bg-red-50'
-                }`}>
+              <div className={`mt-4 p-4 rounded-lg flex items-start gap-3 ${
+                uploadStatus.success ? 'bg-green-50' : 'bg-red-50'
+              }`}>
                 {uploadStatus.success ? (
-                  <CheckCircle className="h-5 w-5 text-green-600 mt-0.5" />
+                  <CheckCircle className="h-5 w-5 text-green-600 mt-0.5 flex-shrink-0" />
                 ) : (
-                  <AlertCircle className="h-5 w-5 text-red-600 mt-0.5" />
+                  <AlertCircle className="h-5 w-5 text-red-600 mt-0.5 flex-shrink-0" />
                 )}
                 <div>
-                  <p className={`font-medium ${uploadStatus.success ? 'text-green-800' : 'text-red-800'
-                    }`}>
+                  <p className={`font-medium ${
+                    uploadStatus.success ? 'text-green-800' : 'text-red-800'
+                  }`}>
                     {uploadStatus.success ? 'Success!' : 'Error!'}
                   </p>
-                  <p className={`text-sm ${uploadStatus.success ? 'text-green-600' : 'text-red-600'
-                    }`}>
+                  <p className={`text-sm ${
+                    uploadStatus.success ? 'text-green-600' : 'text-red-600'
+                  }`}>
                     {uploadStatus.message}
                   </p>
                 </div>
@@ -602,8 +978,14 @@ function App() {
               <div className="relative">
                 <textarea
                   value={question}
-                  onChange={(e) => setQuestion(e.target.value)}
-                  placeholder="Ask something about your PDF..."
+                  onChange={(e) => {
+                    // Limit to 500 characters
+                    if (e.target.value.length <= 500) {
+                      setQuestion(e.target.value);
+                    }
+                  }}
+                  onKeyDown={handleKeyDown}
+                  placeholder="Ask something about your PDF... (Press Enter to submit, Shift+Enter for new line)"
                   className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none"
                   rows="4"
                 />
@@ -615,10 +997,11 @@ function App() {
               <button
                 onClick={handleAsk}
                 disabled={!question.trim() || asking}
-                className={`w-full py-3 px-4 rounded-lg font-medium flex items-center justify-center gap-2 transition-all ${!question.trim() || asking
-                  ? "bg-gray-300 text-gray-500 cursor-not-allowed"
-                  : "bg-purple-600 text-white hover:bg-purple-700 hover:shadow-lg"
-                  }`}
+                className={`w-full py-3 px-4 rounded-lg font-medium flex items-center justify-center gap-2 transition-all ${
+                  !question.trim() || asking
+                    ? "bg-gray-300 text-gray-500 cursor-not-allowed"
+                    : "bg-purple-600 text-white hover:bg-purple-700 hover:shadow-lg"
+                }`}
               >
                 {asking ? (
                   <>
@@ -635,9 +1018,7 @@ function App() {
             </div>
 
             {/* Answer Section */}
-
-            {/* Answer Section */}
-            {(answer || asking) && (
+            {(answer || asking || sources.length > 0) && (
               <div className="mt-6 border-t pt-6">
                 <h3 className="text-lg font-semibold text-gray-800 mb-3 flex items-center gap-2">
                   <Sparkles className="h-5 w-5 text-purple-600" />
@@ -653,26 +1034,31 @@ function App() {
                       </div>
                     </div>
                   ) : (
-                    <p className="text-gray-700 whitespace-pre-wrap">{answer}</p>
+                    <p className="text-gray-700 whitespace-pre-wrap">
+                      {answer || "No answer yet. Ask a question above!"}
+                    </p>
                   )}
                 </div>
 
-                {/* Sources Section */}
+                {/* Sources Section - FIXED */}
                 {sources && sources.length > 0 && (
                   <div className="bg-blue-50 rounded-lg p-4">
                     <h4 className="text-sm font-semibold text-blue-800 mb-2 flex items-center gap-2">
-                      <span className="bg-blue-200 text-blue-800 rounded-full w-5 h-5 flex items-center justify-center text-xs">
-                        ðŸ“„
-                      </span>
+                      <BookOpen className="h-4 w-4" />
                       Sources Used
                     </h4>
                     <div className="flex flex-wrap gap-2">
-                      {sources.map((s, i) => (
+                      {sources.map((source, index) => (
                         <span
-                          key={i}
-                          className="bg-white text-blue-700 px-3 py-1 rounded-full text-xs font-medium border border-blue-200 shadow-sm"
+                          key={index}
+                          className="bg-white text-blue-700 px-3 py-1 rounded-full text-xs font-medium border border-blue-200 shadow-sm flex items-center gap-1"
                         >
-                          Page {s}
+                          <FileText className="h-3 w-3" />
+                          {/* FIXED: Display page number correctly */}
+                          Page {source.page || 'N/A'}
+                          {source.file && (
+                            <span className="text-blue-400">â€¢ {source.file.split('/').pop()}</span>
+                          )}
                         </span>
                       ))}
                     </div>
@@ -747,6 +1133,20 @@ const API = axios.create({
     baseURL: 'http://127.0.0.1:8000',
 })
 
+API.interceptors.response.use(
+    response => response,
+    error => {
+        if (error.code === 'ECONNABORTED') {
+            console.error('Request timeout');
+            return Promise.reject(new Error('Request timed out. Please try again.'));
+        }
+        if (!error.response) {
+            console.error('Network error - backend not reachable');
+            return Promise.reject(new Error('Cannot connect to server. Make sure backend is running.'));
+        }
+        return Promise.reject(error);
+    }
+);
 
 export default API;
 
@@ -756,12 +1156,36 @@ FILE: Frontend/src/api/ask.js
 ================================================
 import API from "./api";
 
-export const askQuestion = async (question) =>{
-    const res = await API.post('/ask', { 
-        question : question
-     })
-    return res.data;
-}
+export const askQuestion = async (question) => {
+    try {
+        const res = await API.post('/ask', {
+            question: question
+        });
+        
+        // Validate response structure
+        if (!res.data) {
+            throw new Error('Empty response from server');
+        }
+        
+        return {
+            answer: res.data.answer || 'No answer received',
+            sources: res.data.sources || [],
+            question: res.data.question || question
+        };
+    } catch (error) {
+        // Enhanced error handling
+        if (error.response) {
+            // Server responded with error
+            throw new Error(error.response.data?.detail || `Error ${error.response.status}: Failed to get answer`);
+        } else if (error.request) {
+            // No response received
+            throw new Error('Cannot reach server. Make sure backend is running.');
+        } else {
+            // Other errors
+            throw new Error(error.message || 'Failed to ask question');
+        }
+    }
+};
 
 
 ================================================
@@ -769,17 +1193,31 @@ FILE: Frontend/src/api/upload.js
 ================================================
 import API from "./api";
 
-export const uploadPDF = async (file) =>{
-    const formData = new FormData();
-    formData.append('file',file)
+export const uploadPDF = async (file) => {
+    try {
+        const formData = new FormData();
+        formData.append('file', file);
 
-    const res = await API.post('/upload',formData,{
-        headers:{
-            "Content-Type":"multipart/form-data"
+        const res = await API.post('/upload', formData, {
+            headers: {
+                "Content-Type": "multipart/form-data"
+            }
+        });
+        
+        return res.data;
+    } catch (error) {
+        // Enhanced error handling
+        if (error.response) {
+            // The request was made and the server responded with a status code
+            // that falls out of the range of 2xx
+            throw new Error(error.response.data?.detail || `Upload failed: ${error.response.status}`);
+        } else if (error.request) {
+            // The request was made but no response was received
+            throw new Error('No response from server. Is the backend running?');
+        } else {
+            // Something happened in setting up the request that triggered an Error
+            throw new Error(error.message || 'Upload failed');
         }
-    })
-    return res.data;
-}
-
-
+    }
+};
 

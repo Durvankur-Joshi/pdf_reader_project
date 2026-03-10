@@ -12,7 +12,7 @@ except Exception as e:
     logger.error(f"Failed to load embeddings: {e}")
     raise
 
-def search_documents(query, limit=3):
+def search_documents(query, user_id, limit=3):
     """Search for relevant documents using vector similarity"""
     
     if not query or not query.strip():
@@ -22,15 +22,16 @@ def search_documents(query, limit=3):
         # Generate query embedding
         query_vector = embeddings.embed_query(query)
         
-        # MongoDB vector search pipeline
+        # MongoDB vector search pipeline with user filter
         pipeline = [
             {
                 "$vectorSearch": {
-                    "index": "vector_index",  # Make sure this index exists in MongoDB
+                    "index": "vector_index",
                     "path": "embedding",
                     "queryVector": query_vector,
                     "numCandidates": 100,
-                    "limit": limit
+                    "limit": limit,
+                    "filter": {"user_id": user_id}
                 }
             },
             {
@@ -38,6 +39,7 @@ def search_documents(query, limit=3):
                     "text": 1,
                     "page": 1,
                     "file": 1,
+                    "user_id": 1,
                     "score": {"$meta": "vectorSearchScore"}
                 }
             }
@@ -56,19 +58,22 @@ def search_documents(query, limit=3):
                 "score": r.get("score", 0)
             })
         
-        logger.info(f"Found {len(docs)} relevant documents for query")
+        logger.info(f"Found {len(docs)} relevant documents for query from user {user_id}")
         return docs
         
     except Exception as e:
         logger.error(f"Vector search failed: {e}")
         # Fallback to text search if vector search fails
-        return fallback_text_search(query, limit)
+        return fallback_text_search(query, user_id, limit)
 
-def fallback_text_search(query, limit=3):
+def fallback_text_search(query, user_id, limit=3):
     """Fallback text search if vector search fails"""
     try:
         results = collection.find(
-            {"text": {"$regex": query, "$options": "i"}}
+            {
+                "text": {"$regex": query, "$options": "i"},
+                "user_id": user_id
+            }
         ).limit(limit)
         
         docs = []

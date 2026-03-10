@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 # Initialize Gemini model
 try:
     model = ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash",  
+        model="gemini-1.5-flash",  
         google_api_key=os.getenv("GOOGLE_API_KEY"),
         temperature=0.3,
         max_tokens=500
@@ -20,7 +20,7 @@ except Exception as e:
     logger.error(f"Failed to initialize Gemini model: {e}")
     model = None
 
-def ask_question(question):
+def ask_question(question, user_id):
     """Answer question using RAG pipeline"""
     
     if not model:
@@ -30,8 +30,8 @@ def ask_question(question):
         }
     
     try:
-        # Search for relevant documents
-        docs = search_documents(question)
+        # Search for relevant documents for this user
+        docs = search_documents(question, user_id)
         
         if not docs:
             return {
