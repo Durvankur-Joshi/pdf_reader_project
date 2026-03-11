@@ -1,22 +1,147 @@
-
 @import "tailwindcss";
 
 @layer base {
   body {
     @apply antialiased;
+    overflow: hidden;
+  }
+
+  /* Dark mode styles */
+  .dark {
+    color-scheme: dark;
+  }
+
+  /* Custom scrollbar */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  ::-webkit-scrollbar-track {
+    @apply bg-gray-100 dark:bg-gray-800;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply bg-gray-300 dark:bg-gray-600 rounded-full;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-gray-400 dark:bg-gray-500;
   }
 }
 
 @layer components {
-  .btn-primary {
-    @apply bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors;
+  /* Message animations */
+  .message-enter {
+    animation: slideIn 0.3s ease-out;
   }
-  
-  .btn-secondary {
-    @apply bg-gray-200 text-gray-800 px-4 py-2 rounded-lg hover:bg-gray-300 transition-colors;
+
+  @keyframes slideIn {
+    from {
+      opacity: 0;
+      transform: translateY(20px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
   }
-  
-  .input-field {
-    @apply w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent;
+
+  /* Typing indicator animation */
+  .animate-bounce {
+    animation: bounce 1s infinite;
+  }
+
+  @keyframes bounce {
+    0%, 60%, 100% {
+      transform: translateY(0);
+    }
+    30% {
+      transform: translateY(-10px);
+    }
+  }
+
+  /* Pulse animation for recording */
+  .animate-pulse {
+    animation: pulse 2s infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.5;
+    }
+  }
+
+  /* Markdown styles */
+  .prose {
+    @apply text-gray-800 dark:text-gray-200;
+  }
+
+  .prose h1 {
+    @apply text-2xl font-bold mb-4;
+  }
+
+  .prose h2 {
+    @apply text-xl font-bold mb-3;
+  }
+
+  .prose h3 {
+    @apply text-lg font-bold mb-2;
+  }
+
+  .prose p {
+    @apply mb-2;
+  }
+
+  .prose ul {
+    @apply list-disc list-inside mb-2;
+  }
+
+  .prose ol {
+    @apply list-decimal list-inside mb-2;
+  }
+
+  .prose code {
+    @apply bg-gray-100 dark:bg-gray-700 px-1 py-0.5 rounded text-sm;
+  }
+
+  .prose pre {
+    @apply bg-gray-100 dark:bg-gray-700 p-3 rounded-lg overflow-x-auto mb-2;
+  }
+
+  .prose blockquote {
+    @apply border-l-4 border-gray-300 dark:border-gray-600 pl-4 italic;
+  }
+
+  .prose a {
+    @apply text-blue-600 dark:text-blue-400 hover:underline;
+  }
+
+  /* File upload preview */
+  .file-preview {
+    @apply bg-gray-50 dark:bg-gray-800 rounded-lg p-2;
+  }
+
+  /* Loading spinner */
+  .loading-spinner {
+    @apply animate-spin rounded-full border-2 border-gray-300 dark:border-gray-600 border-t-blue-600 dark:border-t-blue-400;
+  }
+
+  /* Tooltip */
+  .tooltip {
+    @apply absolute -top-8 left-1/2 transform -translate-x-1/2 bg-gray-800 text-white text-xs py-1 px-2 rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none;
+  }
+
+  /* Gradient text */
+  .gradient-text {
+    @apply bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent;
+  }
+
+  /* Glass effect */
+  .glass {
+    @apply bg-white/80 dark:bg-gray-900/80 backdrop-blur-lg;
   }
 }

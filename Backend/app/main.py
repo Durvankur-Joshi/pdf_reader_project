@@ -1,45 +1,26 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
-from app.ingest import ingest_pdf_from_bytes
-from app.query import ask_question
-from pydantic import BaseModel
+from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Form
 from fastapi.middleware.cors import CORSMiddleware
-from app.vector_search import search_documents
-import logging
 from typing import Optional, List
 from datetime import datetime
-import gridfs
-from app.mongo_db import db
+import logging
+
 from app.auth import router as auth_router, get_current_user_id
-from bson import ObjectId
+from app.file_processor import FileProcessor
+from app.chat_manager import ChatSessionManager
+from app.query import ask_question
+from app.models import (
+    ChatRequest,
+    ChatResponse,
+    FileUploadResponse,
+    ChatSessionResponse,
+    MessageRole,
+)
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize GridFS
-fs = gridfs.GridFS(db)
-files_collection = db["files"]
-
-
-class QuestionRequest(BaseModel):
-    question: str
-
-
-class Source(BaseModel):
-    file: str
-    page: int
-    score: Optional[float] = None
-
-
-class AnswerResponse(BaseModel):
-    question: str
-    answer: str
-    sources: List[Source]
-
-
-app = FastAPI(
-    title="PDF RAG API", description="Upload PDFs and ask questions about them"
-)
+app = FastAPI(title="PDF AI Assistant API")
 
 # Configure CORS
 app.add_middleware(
@@ -55,185 +36,319 @@ app.include_router(auth_router)
 
 
 @app.get("/")
-def home():
-    return {"message": "RAG API running", "status": "healthy"}
+async def home():
+    return {
+        "message": "PDF AI Assistant API",
+        "version": "2.0",
+        "features": [
+            "Multi-file support",
+            "Multi-format support (PDF, DOCX, TXT, XLSX, PPTX, Images)",
+            "Chat sessions",
+            "Conversation history",
+        ],
+    }
 
 
-@app.post("/upload")
-async def upload_pdf(
-    file: UploadFile = File(...), user_id: str = Depends(get_current_user_id)
+# ==================== File Upload Endpoints ====================
+
+
+@app.post("/upload", response_model=FileUploadResponse)
+async def upload_file(
+    file: UploadFile = File(...),
+    session_id: Optional[str] = Form(None),
+    user_id: str = Depends(get_current_user_id),
 ):
-    """Upload and process a PDF file - stores in MongoDB only"""
+    """Upload and process any supported file type"""
 
     # Validate file type
-    if not file.filename.endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are allowed")
+    file_type = FileProcessor.get_file_type(file.filename)
+    if file_type == "unknown":
+        raise HTTPException(status_code=400, detail="Unsupported file type")
 
     try:
         # Read file content
-        pdf_bytes = await file.read()
+        file_bytes = await file.read()
 
-        # Store original PDF in GridFS with user_id in metadata
-        file_id = fs.put(
-            pdf_bytes,
+        # Process file
+        result = await FileProcessor.process_file(
+            file_bytes=file_bytes,
             filename=file.filename,
-            uploadDate=datetime.utcnow(),
-            contentType="application/pdf",
-            metadata={"user_id": user_id},
+            user_id=user_id,
+            session_id=session_id,
         )
 
-        # Store file metadata with user_id
-        files_collection.insert_one(
-            {
-                "file_id": file_id,
-                "filename": file.filename,
-                "user_id": user_id,
-                "upload_date": datetime.utcnow(),
-                "size": len(pdf_bytes),
-            }
+        # If session_id provided, associate file with session
+        if session_id:
+            await ChatSessionManager.add_file_to_session(
+                session_id=session_id, user_id=user_id, filename=file.filename
+            )
+
+        return FileUploadResponse(
+            filename=result["filename"],
+            file_type=result["file_type"],
+            size=result.get("size", len(file_bytes)),
+            chunks_processed=result["chunks_stored"],
+            session_id=session_id,
         )
-
-        logger.info(f"PDF stored in GridFS with ID: {file_id} for user {user_id}")
-
-        # Process PDF content with user_id
-        result = ingest_pdf_from_bytes(pdf_bytes, file.filename, user_id)
-
-        return {
-            "message": f"File {file.filename} uploaded and processed successfully",
-            "chunks_stored": result.get("chunks_stored", 0),
-            "filename": file.filename,
-            "file_id": str(file_id),
-        }
 
     except Exception as e:
         logger.error(f"Upload failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/files")
-async def list_files(user_id: str = Depends(get_current_user_id)):
-    """List all uploaded PDFs for current user"""
-    try:
-        files = files_collection.find(
-            {"user_id": user_id}, {"filename": 1, "upload_date": 1, "size": 1}
-        )
-        return {
-            "files": [
-                {
-                    "filename": f["filename"],
-                    "upload_date": f["upload_date"],
-                    "size": f.get("size", 0),
-                }
-                for f in files
-            ]
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+# ==================== Chat Session Endpoints ====================
 
 
-@app.get("/file/{filename}")
-async def get_file_info(filename: str, user_id: str = Depends(get_current_user_id)):
-    """Get information about a specific file"""
-    try:
-        file_info = files_collection.find_one(
-            {"filename": filename, "user_id": user_id}
-        )
-        if not file_info:
-            raise HTTPException(status_code=404, detail="File not found")
-
-        return {
-            "filename": file_info["filename"],
-            "upload_date": file_info["upload_date"],
-            "size": file_info.get("size", 0),
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+@app.post("/sessions", response_model=ChatSessionResponse)
+async def create_session(
+    title: Optional[str] = None, user_id: str = Depends(get_current_user_id)
+):
+    """Create a new chat session"""
+    session = await ChatSessionManager.create_session(user_id, title)
+    return ChatSessionResponse(**session)
 
 
-@app.post("/ask", response_model=AnswerResponse)
-async def ask(request: QuestionRequest, user_id: str = Depends(get_current_user_id)):
-    """Ask a question about uploaded PDFs"""
-
-    if not request.question or not request.question.strip():
-        raise HTTPException(status_code=400, detail="Question cannot be empty")
-
-    try:
-        answer = ask_question(request.question, user_id)
-
-        return {
-            "question": request.question,
-            "answer": answer["answer"],
-            "sources": [
-                Source(file=s["file"], page=s["page"], score=s.get("score"))
-                for s in answer["sources"]
-            ],
-        }
-
-    except Exception as e:
-        logger.error(f"Question answering failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+@app.get("/sessions")
+async def list_sessions(user_id: str = Depends(get_current_user_id)):
+    """List all chat sessions for user"""
+    sessions = await ChatSessionManager.get_user_sessions(user_id)
+    return {"sessions": sessions}
 
 
-@app.get("/test-search")
-def test_search(q: str, user_id: str = Depends(get_current_user_id), limit: int = 3):
-    """Test vector search functionality"""
-    try:
-        docs = search_documents(q, user_id, limit)
-        return {"results": docs}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+@app.get("/sessions/{session_id}")
+async def get_session(session_id: str, user_id: str = Depends(get_current_user_id)):
+    """Get a specific chat session with messages"""
+    session = await ChatSessionManager.get_session(session_id, user_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return session
 
 
-@app.get("/health")
-def health_check():
-    """Health check endpoint"""
+@app.delete("/sessions/{session_id}")
+async def delete_session(session_id: str, user_id: str = Depends(get_current_user_id)):
+    """Delete a chat session"""
+    success = await ChatSessionManager.delete_session(session_id, user_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"message": "Session deleted successfully"}
+
+    # Add these endpoints to Backend/app/main.py
+
+@app.get("/sessions/{session_id}/messages")
+async def get_session_messages(
+    session_id: str,
+    user_id: str = Depends(get_current_user_id)
+):
+    """Get all messages for a session"""
+    from app.mongo_db import messages_collection
+    
+    messages = list(messages_collection.find(
+        {"session_id": session_id}
+    ).sort("timestamp", 1))
+    
     return {
-        "status": "healthy",
-        "mongodb": check_mongodb_connection(),
-        "gridfs": check_gridfs(),
+        "messages": [
+            {
+                "id": str(msg["_id"]),
+                "role": msg["role"],
+                "content": msg["content"],
+                "timestamp": msg["timestamp"],
+                "sources": msg.get("sources", [])
+            }
+            for msg in messages
+        ]
+    }
+
+@app.put("/sessions/{session_id}")
+async def update_session(
+    session_id: str,
+    title: str,
+    user_id: str = Depends(get_current_user_id)
+):
+    """Update session title"""
+    from app.mongo_db import sessions_collection
+    
+    result = sessions_collection.update_one(
+        {"session_id": session_id, "user_id": user_id},
+        {"$set": {"title": title}}
+    )
+    
+    if result.modified_count == 0:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    return {"message": "Session updated successfully"}
+
+@app.delete("/sessions/{session_id}/messages/{message_id}")
+async def delete_message(
+    session_id: str,
+    message_id: str,
+    user_id: str = Depends(get_current_user_id)
+):
+    """Delete a specific message"""
+    from app.mongo_db import messages_collection
+    from bson import ObjectId
+    
+    result = messages_collection.delete_one({
+        "_id": ObjectId(message_id),
+        "session_id": session_id
+    })
+    
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Message not found")
+    
+    return {"message": "Message deleted successfully"}
+
+@app.get("/bookmarks")
+async def get_bookmarks(user_id: str = Depends(get_current_user_id)):
+    """Get all bookmarked messages"""
+    from app.mongo_db import messages_collection
+    
+    messages = list(messages_collection.find({
+        "user_id": user_id,
+        "bookmarked": True
+    }).sort("timestamp", -1))
+    
+    return {
+        "bookmarks": [
+            {
+                "id": str(msg["_id"]),
+                "content": msg["content"],
+                "session_id": msg["session_id"],
+                "timestamp": msg["timestamp"]
+            }
+            for msg in messages
+        ]
     }
 
 
-def check_mongodb_connection():
-    """Check MongoDB connection"""
-    try:
-        from app.mongo_db import client
+# ==================== Chat Endpoints ====================
 
+
+@app.post("/chat")
+async def chat(request: ChatRequest, user_id: str = Depends(get_current_user_id)):
+    """Send a message in a chat session"""
+
+    # Create new session if none provided
+    session_id = request.session_id
+    if not session_id:
+        new_session = await ChatSessionManager.create_session(user_id)
+        session_id = new_session["session_id"]
+
+    # Save user message
+    await ChatSessionManager.add_message(
+        session_id=session_id,
+        user_id=user_id,
+        role=MessageRole.USER,
+        content=request.message,
+    )
+
+    # Get answer
+    answer_data = await ask_question(
+        question=request.message,
+        user_id=user_id,
+        session_id=session_id,
+        files=request.files,
+    )
+
+    # Save assistant message
+    await ChatSessionManager.add_message(
+        session_id=session_id,
+        user_id=user_id,
+        role=MessageRole.ASSISTANT,
+        content=answer_data["answer"],
+        sources=answer_data["sources"],
+    )
+
+    return ChatResponse(
+        session_id=session_id,
+        message=answer_data["answer"],
+        sources=answer_data["sources"],
+        timestamp=datetime.utcnow(),
+    )
+
+
+# ==================== File Management Endpoints ====================
+
+
+@app.get("/files")
+async def list_files(
+    session_id: Optional[str] = None, user_id: str = Depends(get_current_user_id)
+):
+    """List all files for user, optionally filtered by session"""
+    from app.mongo_db import files_collection
+
+    query = {"user_id": user_id}
+    if session_id:
+        query["session_id"] = session_id
+
+    files = files_collection.find(
+        query,
+        {
+            "filename": 1,
+            "file_type": 1,
+            "size": 1,
+            "upload_date": 1,
+            "chunks": 1,
+            "session_id": 1,
+        },
+    ).sort("upload_date", -1)
+
+    return {
+        "files": [
+            {
+                "filename": f["filename"],
+                "file_type": f.get("file_type", "unknown"),
+                "size": f.get("size", 0),
+                "upload_date": f["upload_date"],
+                "chunks": f.get("chunks", 0),
+                "session_id": f.get("session_id"),
+            }
+            for f in files
+        ]
+    }
+
+
+@app.delete("/files/{filename}")
+async def delete_file(filename: str, user_id: str = Depends(get_current_user_id)):
+    """Delete a file and its chunks"""
+    from app.mongo_db import files_collection, collection, fs
+
+    # Find file
+    file_doc = files_collection.find_one({"filename": filename, "user_id": user_id})
+
+    if not file_doc:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    # Delete from GridFS
+    if file_doc.get("file_id"):
+        fs.delete(file_doc["file_id"])
+
+    # Delete metadata
+    files_collection.delete_one({"_id": file_doc["_id"]})
+
+    # Delete chunks
+    collection.delete_many({"file": filename, "user_id": user_id})
+
+    return {"message": f"File {filename} deleted successfully"}
+
+
+# ==================== Health Check ====================
+
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    from app.mongo_db import client
+
+    try:
         client.admin.command("ping")
-        return True
+        mongodb_status = "connected"
     except:
-        return False
+        mongodb_status = "disconnected"
 
+    return {
+        "status": "healthy",
+        "mongodb": mongodb_status,
+        "timestamp": datetime.utcnow(),
+    }
 
-def check_gridfs():
-    """Check GridFS is working"""
-    try:
-        # Try to list files
-        list(fs.find().limit(1))
-        return True
-    except:
-        return False
-
-
-@app.delete("/cleanup/{filename}")
-async def cleanup_file(filename: str, user_id: str = Depends(get_current_user_id)):
-    """Delete a file and its chunks from MongoDB"""
-    try:
-        # Find file in GridFS that belongs to user
-        gridfs_file = fs.find_one({"filename": filename, "metadata.user_id": user_id})
-
-        if gridfs_file:
-            # Delete from GridFS
-            fs.delete(gridfs_file._id)
-
-            # Delete metadata
-            files_collection.delete_one({"filename": filename, "user_id": user_id})
-
-            # Delete all document chunks for this user and file
-            collection.delete_many({"file": filename, "user_id": user_id})
-
-            return {"message": f"File {filename} and its data cleaned up successfully"}
-        else:
-            raise HTTPException(status_code=404, detail="File not found")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))

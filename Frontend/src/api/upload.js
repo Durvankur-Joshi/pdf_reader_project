@@ -1,29 +1,49 @@
 import API from "./api";
 
-export const uploadPDF = async (file) => {
+export const uploadFile = async (file, sessionId = null) => {
     try {
         const formData = new FormData();
         formData.append('file', file);
+        
+        if (sessionId) {
+            formData.append('session_id', sessionId);
+        }
 
-        const res = await API.post('/upload', formData, {
+        const response = await API.post('/upload', formData, {
             headers: {
                 "Content-Type": "multipart/form-data"
+            },
+            onUploadProgress: (progressEvent) => {
+                const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+                // You can handle progress here if needed
             }
         });
         
-        return res.data;
+        return response.data;
     } catch (error) {
-        // Enhanced error handling
-        if (error.response) {
-            // The request was made and the server responded with a status code
-            // that falls out of the range of 2xx
-            throw new Error(error.response.data?.detail || `Upload failed: ${error.response.status}`);
-        } else if (error.request) {
-            // The request was made but no response was received
-            throw new Error('No response from server. Is the backend running?');
-        } else {
-            // Something happened in setting up the request that triggered an Error
-            throw new Error(error.message || 'Upload failed');
-        }
+        console.error('Upload failed:', error);
+        throw error;
+    }
+};
+
+export const getUserFiles = async (sessionId = null) => {
+    try {
+        const response = await API.get('/files', {
+            params: { session_id: sessionId }
+        });
+        return response.data;
+    } catch (error) {
+        console.error('Failed to fetch files:', error);
+        throw error;
+    }
+};
+
+export const deleteFile = async (filename) => {
+    try {
+        const response = await API.delete(`/files/${filename}`);
+        return response.data;
+    } catch (error) {
+        console.error('Failed to delete file:', error);
+        throw error;
     }
 };

@@ -3,8 +3,14 @@ Directory structure:
     ├── Backend/
     │   ├── requirements.txt
     │   ├── app/
+    │   │   ├── auth.py
+    │   │   ├── auth_config.py
+    │   │   ├── auth_models.py
+    │   │   ├── chat_manager.py
+    │   │   ├── file_processor.py
     │   │   ├── ingest.py
     │   │   ├── main.py
+    │   │   ├── models.py
     │   │   ├── mongo_db.py
     │   │   ├── query.py
     │   │   └── vector_search.py
@@ -23,26 +29,718 @@ Directory structure:
             ├── App.jsx
             ├── index.css
             ├── main.jsx
-            └── api/
-                ├── api.js
-                ├── ask.js
-                └── upload.js
+            ├── api/
+            │   ├── api.js
+            │   ├── ask.js
+            │   ├── chat.js
+            │   └── upload.js
+            ├── components/
+            │   ├── Navbar.jsx
+            │   └── ProtectedRoute.jsx
+            ├── context/
+            │   └── AuthContext.jsx
+            └── pages/
+                ├── Login.jsx
+                └── Signup.jsx
 
 ================================================
 FILE: Backend/requirements.txt
 ================================================
-fastapi
-uvicorn
-python-multipart
-langchain
-langchain-community
-langchain-google-genai
-google-generativeai
-pypdf
-faiss-cpu
-python-dotenv
-langchain_huggingface
-tiktoken
+fastapi==0.104.1
+uvicorn==0.24.0
+python-multipart==0.0.6
+langchain==0.1.0
+langchain-community==0.0.10
+langchain-google-genai==0.0.5
+google-generativeai==0.3.0
+pypdf==3.17.4
+faiss-cpu==1.7.4
+python-dotenv==1.0.0
+langchain-huggingface==0.0.3
+tiktoken==0.5.1
+passlib[argon2]==1.7.4
+python-jose[cryptography]==3.3.0
+pymongo==4.5.0
+argon2-cffi==23.1.0
+pypdf2==3.0.1
+python-docx==1.1.0
+openpyxl==3.1.2
+pandas==2.1.3
+python-pptx==0.6.23
+pillow==10.1.0
+pytesseract==0.3.10
+
+
+================================================
+FILE: Backend/app/auth.py
+================================================
+from fastapi import APIRouter, HTTPException, Depends, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from app.auth_models import UserCreate, UserLogin, TokenResponse, UserResponse
+from app.auth_config import verify_password, get_password_hash, create_access_token, verify_token
+from app.mongo_db import db
+from datetime import datetime, timedelta
+from bson import ObjectId
+import logging
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/auth", tags=["authentication"])
+
+# OAuth2 scheme for token authentication
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
+
+# Users collection
+users_collection = db["users"]
+
+@router.post("/signup", response_model=TokenResponse)
+async def signup(user_data: UserCreate):
+    """Register a new user"""
+    
+    # Check if user already exists
+    existing_user = users_collection.find_one({"email": user_data.email})
+    if existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already registered"
+        )
+    
+    # Hash password and create user
+    hashed_password = get_password_hash(user_data.password)
+    
+    user = {
+        "email": user_data.email,
+        "password": hashed_password,
+        "created_at": datetime.utcnow()
+    }
+    
+    result = users_collection.insert_one(user)
+    user_id = str(result.inserted_id)
+    
+    # Create access token
+    access_token = create_access_token(
+        data={"sub": user_data.email, "user_id": user_id}
+    )
+    
+    return TokenResponse(
+        access_token=access_token,
+        token_type="bearer",
+        user=UserResponse(id=user_id, email=user_data.email)
+    )
+
+@router.post("/login", response_model=TokenResponse)
+async def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    """Login with email and password (OAuth2 compatible)"""
+    
+    # Find user
+    user = users_collection.find_one({"email": form_data.username})
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    # Verify password
+    if not verify_password(form_data.password, user["password"]):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    # Create access token
+    access_token = create_access_token(
+        data={"sub": user["email"], "user_id": str(user["_id"])}
+    )
+    
+    return TokenResponse(
+        access_token=access_token,
+        token_type="bearer",
+        user=UserResponse(id=str(user["_id"]), email=user["email"])
+    )
+
+@router.post("/login/json")
+async def login_json(user_data: UserLogin):
+    """Login with JSON body (alternative to form)"""
+    
+    # Find user
+    user = users_collection.find_one({"email": user_data.email})
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password"
+        )
+    
+    # Verify password
+    if not verify_password(user_data.password, user["password"]):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password"
+        )
+    
+    # Create access token
+    access_token = create_access_token(
+        data={"sub": user["email"], "user_id": str(user["_id"])}
+    )
+    
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user": {
+            "id": str(user["_id"]),
+            "email": user["email"]
+        }
+    }
+
+@router.get("/me", response_model=UserResponse)
+async def get_current_user(token: str = Depends(oauth2_scheme)):
+    """Get current user info"""
+    
+    payload = verify_token(token)
+    if not payload:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    email = payload.get("sub")
+    user_id = payload.get("user_id")
+    
+    if not email or not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token payload"
+        )
+    
+    user = users_collection.find_one({"_id": ObjectId(user_id), "email": email})
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found"
+        )
+    
+    return UserResponse(id=str(user["_id"]), email=user["email"])
+
+# Dependency to get current user for protected routes
+async def get_current_user_id(token: str = Depends(oauth2_scheme)) -> str:
+    """Get current user ID from token"""
+    
+    payload = verify_token(token)
+    if not payload:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    user_id = payload.get("user_id")
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token"
+        )
+    
+    return user_id
+
+
+================================================
+FILE: Backend/app/auth_config.py
+================================================
+from passlib.context import CryptContext
+from datetime import datetime, timedelta
+from jose import JWTError, jwt
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# JWT Configuration
+SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-in-production")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
+
+# Password hashing - using argon2 which doesn't have the 72-byte limit
+pwd_context = CryptContext(
+    schemes=["argon2"],
+    deprecated="auto",
+    argon2__memory_cost=65536,  # 64MB
+    argon2__time_cost=3,
+    argon2__parallelism=4
+)
+
+def verify_password(plain_password, hashed_password):
+    """Verify a plain password against a hashed password"""
+    try:
+        return pwd_context.verify(plain_password, hashed_password)
+    except Exception as e:
+        print(f"Password verification error: {e}")
+        return False
+
+def get_password_hash(password):
+    """Hash a password"""
+    try:
+        return pwd_context.hash(password)
+    except Exception as e:
+        print(f"Password hashing error: {e}")
+        raise
+
+def create_access_token(data: dict, expires_delta: timedelta = None):
+    """Create a JWT access token"""
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+def verify_token(token: str):
+    """Verify a JWT token and return the payload"""
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        return payload
+    except JWTError:
+        return None
+
+
+================================================
+FILE: Backend/app/auth_models.py
+================================================
+from pydantic import BaseModel, EmailStr, Field
+from typing import Optional
+
+class UserCreate(BaseModel):
+    """User registration model"""
+    email: EmailStr
+    password: str = Field(..., min_length=6)
+
+class UserLogin(BaseModel):
+    """User login model"""
+    email: EmailStr
+    password: str
+
+class UserResponse(BaseModel):
+    """User response model"""
+    id: str
+    email: str
+
+class TokenResponse(BaseModel):
+    """Token response model"""
+    access_token: str
+    token_type: str
+    user: UserResponse
+
+class TokenData(BaseModel):
+    """Token data model"""
+    email: Optional[str] = None
+    user_id: Optional[str] = None
+
+
+================================================
+FILE: Backend/app/chat_manager.py
+================================================
+from app.mongo_db import db
+from app.models import ChatSession, Message, MessageRole, ChatSessionResponse
+from datetime import datetime
+from typing import List, Optional, Dict, Any
+import uuid
+import logging
+from bson import ObjectId
+
+logger = logging.getLogger(__name__)
+
+sessions_collection = db["chat_sessions"]
+messages_collection = db["messages"]
+
+class ChatSessionManager:
+    
+    @staticmethod
+    async def create_session(user_id: str, title: str = None) -> Dict[str, Any]:
+        """Create a new chat session"""
+        if not title:
+            title = f"Chat Session {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}"
+        
+        session_id = str(uuid.uuid4())
+        
+        session = {
+            "session_id": session_id,
+            "user_id": user_id,
+            "title": title,
+            "created_at": datetime.utcnow(),
+            "updated_at": datetime.utcnow(),
+            "files": [],
+            "message_count": 0
+        }
+        
+        sessions_collection.insert_one(session)
+        
+        return {
+            "session_id": session_id,
+            "title": title,
+            "created_at": session["created_at"],
+            "updated_at": session["updated_at"],
+            "message_count": 0,
+            "file_count": 0
+        }
+    
+    @staticmethod
+    async def get_user_sessions(user_id: str) -> List[Dict[str, Any]]:
+        """Get all sessions for a user"""
+        cursor = sessions_collection.find(
+            {"user_id": user_id}
+        ).sort("updated_at", -1)
+        
+        sessions = []
+        for doc in cursor:
+            sessions.append({
+                "session_id": doc["session_id"],
+                "title": doc["title"],
+                "created_at": doc["created_at"],
+                "updated_at": doc["updated_at"],
+                "message_count": doc.get("message_count", 0),
+                "file_count": len(doc.get("files", []))
+            })
+        
+        return sessions
+    
+    @staticmethod
+    async def get_session(session_id: str, user_id: str) -> Optional[Dict[str, Any]]:
+        """Get a specific session"""
+        session = sessions_collection.find_one({
+            "session_id": session_id,
+            "user_id": user_id
+        })
+        
+        if not session:
+            return None
+        
+        # Get messages for this session
+        messages = list(messages_collection.find(
+            {"session_id": session_id}
+        ).sort("timestamp", 1))
+        
+        return {
+            "session_id": session["session_id"],
+            "title": session["title"],
+            "created_at": session["created_at"],
+            "updated_at": session["updated_at"],
+            "files": session.get("files", []),
+            "messages": [
+                {
+                    "role": msg["role"],
+                    "content": msg["content"],
+                    "timestamp": msg["timestamp"],
+                    "sources": msg.get("sources", [])
+                }
+                for msg in messages
+            ]
+        }
+    
+    @staticmethod
+    async def add_message(
+        session_id: str,
+        user_id: str,
+        role: MessageRole,
+        content: str,
+        sources: List[Dict[str, Any]] = None
+    ) -> None:
+        """Add a message to a session"""
+        # Verify session belongs to user
+        session = sessions_collection.find_one({
+            "session_id": session_id,
+            "user_id": user_id
+        })
+        
+        if not session:
+            raise ValueError("Session not found")
+        
+        # Add message
+        message = {
+            "session_id": session_id,
+            "role": role.value if isinstance(role, MessageRole) else role,
+            "content": content,
+            "timestamp": datetime.utcnow(),
+            "sources": sources or []
+        }
+        
+        messages_collection.insert_one(message)
+        
+        # Update session
+        sessions_collection.update_one(
+            {"session_id": session_id},
+            {
+                "$set": {"updated_at": datetime.utcnow()},
+                "$inc": {"message_count": 1}
+            }
+        )
+    
+    @staticmethod
+    async def add_file_to_session(session_id: str, user_id: str, filename: str) -> None:
+        """Add a file reference to a session"""
+        sessions_collection.update_one(
+            {
+                "session_id": session_id,
+                "user_id": user_id
+            },
+            {
+                "$addToSet": {"files": filename},
+                "$set": {"updated_at": datetime.utcnow()}
+            }
+        )
+    
+    @staticmethod
+    async def delete_session(session_id: str, user_id: str) -> bool:
+        """Delete a session and its messages"""
+        result = sessions_collection.delete_one({
+            "session_id": session_id,
+            "user_id": user_id
+        })
+        
+        if result.deleted_count > 0:
+            # Delete messages
+            messages_collection.delete_many({"session_id": session_id})
+            
+            # Note: Files are not deleted, just disassociated
+            return True
+        
+        return False
+    
+    @staticmethod
+    async def get_session_files(session_id: str, user_id: str) -> List[str]:
+        """Get all files associated with a session"""
+        session = sessions_collection.find_one({
+            "session_id": session_id,
+            "user_id": user_id
+        })
+        
+        return session.get("files", []) if session else []
+
+
+================================================
+FILE: Backend/app/file_processor.py
+================================================
+import os
+import logging
+import tempfile
+import uuid
+from typing import List, Dict, Any, Optional
+from datetime import datetime
+from langchain_community.document_loaders import (
+    PyPDFLoader,
+    TextLoader,
+    Docx2txtLoader,
+    UnstructuredExcelLoader,
+    UnstructuredPowerPointLoader,
+)
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_core.documents import Document  # Updated import
+from app.mongo_db import collection, fs, files_collection
+import pandas as pd
+import pytesseract
+from PIL import Image
+import io
+
+logger = logging.getLogger(__name__)
+
+# Initialize embeddings
+embeddings = HuggingFaceEmbeddings(
+    model_name="sentence-transformers/all-MiniLM-L6-v2"
+)
+
+class FileProcessor:
+    SUPPORTED_EXTENSIONS = {
+        '.pdf': 'pdf',
+        '.docx': 'docx',
+        '.doc': 'docx',
+        '.txt': 'txt',
+        '.csv': 'xlsx',
+        '.xlsx': 'xlsx',
+        '.xls': 'xlsx',
+        '.pptx': 'pptx',
+        '.ppt': 'pptx',
+        '.jpg': 'image',
+        '.jpeg': 'image',
+        '.png': 'image',
+        '.gif': 'image'
+    }
+    
+    @classmethod
+    def get_file_type(cls, filename: str) -> str:
+        ext = os.path.splitext(filename)[1].lower()
+        return cls.SUPPORTED_EXTENSIONS.get(ext, 'txt')
+    
+    @classmethod
+    async def process_file(cls, file_bytes: bytes, filename: str, user_id: str, session_id: Optional[str] = None) -> Dict[str, Any]:
+        """Process any supported file type and store in MongoDB"""
+        
+        temp_file_path = None
+        file_type = cls.get_file_type(filename)
+        
+        try:
+            # Create temp file
+            unique_filename = f"{uuid.uuid4()}_{filename}"
+            temp_dir = os.path.join(tempfile.gettempdir(), "file_processor")
+            os.makedirs(temp_dir, exist_ok=True)
+            temp_file_path = os.path.join(temp_dir, unique_filename)
+            
+            with open(temp_file_path, 'wb') as f:
+                f.write(file_bytes)
+            
+            # Load documents based on file type
+            documents = await cls._load_documents(temp_file_path, filename, file_type)
+            
+            if not documents:
+                raise ValueError(f"No content extracted from {filename}")
+            
+            # Split documents into chunks
+            splitter = RecursiveCharacterTextSplitter(
+                chunk_size=1000,
+                chunk_overlap=200
+            )
+            splits = splitter.split_documents(documents)
+            
+            # Store in MongoDB with embeddings
+            success_count = 0
+            for i, doc in enumerate(splits):
+                try:
+                    embedding = embeddings.embed_query(doc.page_content)
+                    
+                    collection.insert_one({
+                        "text": doc.page_content,
+                        "embedding": embedding,
+                        "metadata": doc.metadata,
+                        "file": filename,
+                        "file_type": file_type,
+                        "user_id": user_id,
+                        "session_id": session_id,
+                        "chunk_id": i,
+                        "timestamp": datetime.utcnow()
+                    })
+                    success_count += 1
+                except Exception as e:
+                    logger.error(f"Failed to store chunk {i}: {e}")
+                    continue
+            
+            # Store file in GridFS
+            file_id = fs.put(
+                file_bytes,
+                filename=filename,
+                uploadDate=datetime.utcnow(),
+                contentType=cls._get_mime_type(file_type),
+                metadata={
+                    "user_id": user_id,
+                    "file_type": file_type,
+                    "session_id": session_id
+                }
+            )
+            
+            # Store file metadata
+            files_collection.insert_one({
+                "file_id": file_id,
+                "filename": filename,
+                "file_type": file_type,
+                "user_id": user_id,
+                "session_id": session_id,
+                "upload_date": datetime.utcnow(),
+                "size": len(file_bytes),
+                "chunks": success_count
+            })
+            
+            return {
+                "success": True,
+                "filename": filename,
+                "file_type": file_type,
+                "chunks_stored": success_count,
+                "file_id": str(file_id)
+            }
+            
+        except Exception as e:
+            logger.error(f"File processing failed: {e}")
+            raise
+        finally:
+            if temp_file_path and os.path.exists(temp_file_path):
+                try:
+                    os.remove(temp_file_path)
+                except:
+                    pass
+    
+    @classmethod
+    async def _load_documents(cls, file_path: str, filename: str, file_type: str) -> List[Document]:
+        """Load documents based on file type"""
+        
+        try:
+            if file_type == 'pdf':
+                loader = PyPDFLoader(file_path)
+                return loader.load()
+                
+            elif file_type == 'docx':
+                loader = Docx2txtLoader(file_path)
+                return loader.load()
+                
+            elif file_type == 'txt':
+                loader = TextLoader(file_path, encoding='utf-8')
+                return loader.load()
+                
+            elif file_type == 'xlsx':
+                # Handle Excel files
+                try:
+                    df_dict = pd.read_excel(file_path, sheet_name=None)
+                    documents = []
+                    for sheet_name, df in df_dict.items():
+                        content = f"Sheet: {sheet_name}\n"
+                        content += df.to_string()
+                        doc = Document(
+                            page_content=content,
+                            metadata={"source": filename, "sheet": sheet_name, "page": 0}
+                        )
+                        documents.append(doc)
+                    return documents
+                except Exception as e:
+                    logger.error(f"Excel processing error: {e}")
+                    loader = UnstructuredExcelLoader(file_path)
+                    return loader.load()
+                    
+            elif file_type == 'pptx':
+                loader = UnstructuredPowerPointLoader(file_path)
+                return loader.load()
+                
+            elif file_type == 'image':
+                # Handle images with OCR
+                try:
+                    image = Image.open(file_path)
+                    text = pytesseract.image_to_string(image)
+                    doc = Document(
+                        page_content=text,
+                        metadata={"source": filename, "page": 0}
+                    )
+                    return [doc]
+                except Exception as e:
+                    logger.error(f"OCR failed: {e}")
+                    return []
+                    
+            else:
+                # Default to text loader
+                loader = TextLoader(file_path, encoding='utf-8')
+                return loader.load()
+        except Exception as e:
+            logger.error(f"Error loading documents: {e}")
+            return []
+    
+    @staticmethod
+    def _get_mime_type(file_type: str) -> str:
+        mime_types = {
+            'pdf': 'application/pdf',
+            'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            'txt': 'text/plain',
+            'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            'pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+            'image': 'image/jpeg'
+        }
+        return mime_types.get(file_type, 'application/octet-stream')
 
 
 ================================================
@@ -86,7 +784,7 @@ except Exception as e:
     logger.error(f"Failed to load embeddings model: {e}")
     raise
 
-def ingest_pdf_from_bytes(pdf_bytes, filename):
+def ingest_pdf_from_bytes(pdf_bytes, filename, user_id):
     """Process PDF from bytes and store in MongoDB with vector embeddings"""
     
     temp_file_path = None
@@ -130,19 +828,20 @@ def ingest_pdf_from_bytes(pdf_bytes, filename):
         splits = splitter.split_documents(documents)
         logger.info(f"Created {len(splits)} text chunks")
 
-        # Store in MongoDB with embeddings
+        # Store in MongoDB with embeddings and user_id
         success_count = 0
         for i, doc in enumerate(splits):
             try:
                 # Generate embedding
                 embedding = embeddings.embed_query(doc.page_content)
                 
-                # Store in MongoDB
+                # Store in MongoDB with user_id
                 collection.insert_one({
                     "text": doc.page_content,
                     "embedding": embedding,
                     "page": doc.metadata.get("page", 0),
                     "file": filename,
+                    "user_id": user_id,
                     "chunk_id": i,
                     "timestamp": datetime.utcnow()
                 })
@@ -175,219 +874,345 @@ def ingest_pdf_from_bytes(pdf_bytes, filename):
 ================================================
 FILE: Backend/app/main.py
 ================================================
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from app.ingest import ingest_pdf_from_bytes
-from app.query import ask_question
-from pydantic import BaseModel
+from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Form
 from fastapi.middleware.cors import CORSMiddleware
-from app.vector_search import search_documents
-import logging
 from typing import Optional, List
 from datetime import datetime
-import gridfs
-from app.mongo_db import db
+import logging
+
+from app.auth import router as auth_router, get_current_user_id
+from app.file_processor import FileProcessor
+from app.chat_manager import ChatSessionManager
+from app.query import ask_question
+from app.models import (
+    ChatRequest,
+    ChatResponse,
+    FileUploadResponse,
+    ChatSessionResponse,
+    MessageRole,
+)
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize GridFS
-fs = gridfs.GridFS(db)
-files_collection = db["files"]
-
-class QuestionRequest(BaseModel):
-    question: str
-
-class Source(BaseModel):
-    file: str
-    page: int
-    score: Optional[float] = None
-
-class AnswerResponse(BaseModel):
-    question: str
-    answer: str
-    sources: List[Source]
-
-app = FastAPI(title="PDF RAG API", description="Upload PDFs and ask questions about them")
+app = FastAPI(title="PDF AI Assistant API")
 
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-@app.get("/")
-def home():
-    return {"message": "RAG API running", "status": "healthy"}
+# Include auth routes
+app.include_router(auth_router)
 
-@app.post("/upload")
-async def upload_pdf(file: UploadFile = File(...)):
-    """Upload and process a PDF file - stores in MongoDB only"""
-    
+
+@app.get("/")
+async def home():
+    return {
+        "message": "PDF AI Assistant API",
+        "version": "2.0",
+        "features": [
+            "Multi-file support",
+            "Multi-format support (PDF, DOCX, TXT, XLSX, PPTX, Images)",
+            "Chat sessions",
+            "Conversation history",
+        ],
+    }
+
+
+# ==================== File Upload Endpoints ====================
+
+
+@app.post("/upload", response_model=FileUploadResponse)
+async def upload_file(
+    file: UploadFile = File(...),
+    session_id: Optional[str] = Form(None),
+    user_id: str = Depends(get_current_user_id),
+):
+    """Upload and process any supported file type"""
+
     # Validate file type
-    if not file.filename.endswith('.pdf'):
-        raise HTTPException(status_code=400, detail="Only PDF files are allowed")
-    
+    file_type = FileProcessor.get_file_type(file.filename)
+    if file_type == "unknown":
+        raise HTTPException(status_code=400, detail="Unsupported file type")
+
     try:
         # Read file content
-        pdf_bytes = await file.read()
-        
-        # Store original PDF in GridFS (optional - if you want to keep the original)
-        file_id = fs.put(
-            pdf_bytes, 
+        file_bytes = await file.read()
+
+        # Process file
+        result = await FileProcessor.process_file(
+            file_bytes=file_bytes,
             filename=file.filename,
-            uploadDate=datetime.utcnow(),
-            contentType="application/pdf"
+            user_id=user_id,
+            session_id=session_id,
         )
-        
-        # Store file metadata
-        files_collection.insert_one({
-            "file_id": file_id,
-            "filename": file.filename,
-            "upload_date": datetime.utcnow(),
-            "size": len(pdf_bytes)
-        })
-        
-        logger.info(f"PDF stored in GridFS with ID: {file_id}")
-        
-        # Process PDF content directly from bytes
-        result = ingest_pdf_from_bytes(pdf_bytes, file.filename)
-        
-        return {
-            "message": f"File {file.filename} uploaded and processed successfully",
-            "chunks_stored": result.get("chunks_stored", 0),
-            "filename": file.filename,
-            "file_id": str(file_id)
-        }
-        
+
+        # If session_id provided, associate file with session
+        if session_id:
+            await ChatSessionManager.add_file_to_session(
+                session_id=session_id, user_id=user_id, filename=file.filename
+            )
+
+        return FileUploadResponse(
+            filename=result["filename"],
+            file_type=result["file_type"],
+            size=result.get("size", len(file_bytes)),
+            chunks_processed=result["chunks_stored"],
+            session_id=session_id,
+        )
+
     except Exception as e:
         logger.error(f"Upload failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+
+# ==================== Chat Session Endpoints ====================
+
+
+@app.post("/sessions", response_model=ChatSessionResponse)
+async def create_session(
+    title: Optional[str] = None, user_id: str = Depends(get_current_user_id)
+):
+    """Create a new chat session"""
+    session = await ChatSessionManager.create_session(user_id, title)
+    return ChatSessionResponse(**session)
+
+
+@app.get("/sessions")
+async def list_sessions(user_id: str = Depends(get_current_user_id)):
+    """List all chat sessions for user"""
+    sessions = await ChatSessionManager.get_user_sessions(user_id)
+    return {"sessions": sessions}
+
+
+@app.get("/sessions/{session_id}")
+async def get_session(session_id: str, user_id: str = Depends(get_current_user_id)):
+    """Get a specific chat session with messages"""
+    session = await ChatSessionManager.get_session(session_id, user_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return session
+
+
+@app.delete("/sessions/{session_id}")
+async def delete_session(session_id: str, user_id: str = Depends(get_current_user_id)):
+    """Delete a chat session"""
+    success = await ChatSessionManager.delete_session(session_id, user_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"message": "Session deleted successfully"}
+
+
+# ==================== Chat Endpoints ====================
+
+
+@app.post("/chat")
+async def chat(request: ChatRequest, user_id: str = Depends(get_current_user_id)):
+    """Send a message in a chat session"""
+
+    # Create new session if none provided
+    session_id = request.session_id
+    if not session_id:
+        new_session = await ChatSessionManager.create_session(user_id)
+        session_id = new_session["session_id"]
+
+    # Save user message
+    await ChatSessionManager.add_message(
+        session_id=session_id,
+        user_id=user_id,
+        role=MessageRole.USER,
+        content=request.message,
+    )
+
+    # Get answer
+    answer_data = await ask_question(
+        question=request.message,
+        user_id=user_id,
+        session_id=session_id,
+        files=request.files,
+    )
+
+    # Save assistant message
+    await ChatSessionManager.add_message(
+        session_id=session_id,
+        user_id=user_id,
+        role=MessageRole.ASSISTANT,
+        content=answer_data["answer"],
+        sources=answer_data["sources"],
+    )
+
+    return ChatResponse(
+        session_id=session_id,
+        message=answer_data["answer"],
+        sources=answer_data["sources"],
+        timestamp=datetime.utcnow(),
+    )
+
+
+# ==================== File Management Endpoints ====================
+
+
 @app.get("/files")
-async def list_files():
-    """List all uploaded PDFs"""
-    try:
-        files = files_collection.find({}, {"filename": 1, "upload_date": 1, "size": 1})
-        return {
-            "files": [
-                {
-                    "filename": f["filename"],
-                    "upload_date": f["upload_date"],
-                    "size": f.get("size", 0)
-                }
-                for f in files
-            ]
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+async def list_files(
+    session_id: Optional[str] = None, user_id: str = Depends(get_current_user_id)
+):
+    """List all files for user, optionally filtered by session"""
+    from app.mongo_db import files_collection
 
-@app.get("/file/{filename}")
-async def get_file_info(filename: str):
-    """Get information about a specific file"""
-    try:
-        file_info = files_collection.find_one({"filename": filename})
-        if not file_info:
-            raise HTTPException(status_code=404, detail="File not found")
-        
-        return {
-            "filename": file_info["filename"],
-            "upload_date": file_info["upload_date"],
-            "size": file_info.get("size", 0)
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    query = {"user_id": user_id}
+    if session_id:
+        query["session_id"] = session_id
 
-@app.post("/ask", response_model=AnswerResponse)
-async def ask(request: QuestionRequest):
-    """Ask a question about uploaded PDFs"""
-    
-    if not request.question or not request.question.strip():
-        raise HTTPException(status_code=400, detail="Question cannot be empty")
-    
-    try:
-        answer = ask_question(request.question)
-        
-        return {
-            "question": request.question,
-            "answer": answer["answer"],
-            "sources": [
-                Source(file=s["file"], page=s["page"], score=s.get("score"))
-                for s in answer["sources"]
-            ]
-        }
-        
-    except Exception as e:
-        logger.error(f"Question answering failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    files = files_collection.find(
+        query,
+        {
+            "filename": 1,
+            "file_type": 1,
+            "size": 1,
+            "upload_date": 1,
+            "chunks": 1,
+            "session_id": 1,
+        },
+    ).sort("upload_date", -1)
 
-@app.get("/test-search")
-def test_search(q: str, limit: int = 3):
-    """Test vector search functionality"""
-    try:
-        docs = search_documents(q, limit)
-        return {"results": docs}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/health")
-def health_check():
-    """Health check endpoint"""
     return {
-        "status": "healthy",
-        "mongodb": check_mongodb_connection(),
-        "gridfs": check_gridfs()
+        "files": [
+            {
+                "filename": f["filename"],
+                "file_type": f.get("file_type", "unknown"),
+                "size": f.get("size", 0),
+                "upload_date": f["upload_date"],
+                "chunks": f.get("chunks", 0),
+                "session_id": f.get("session_id"),
+            }
+            for f in files
+        ]
     }
 
-def check_mongodb_connection():
-    """Check MongoDB connection"""
-    try:
-        from app.mongo_db import client
-        client.admin.command('ping')
-        return True
-    except:
-        return False
 
-def check_gridfs():
-    """Check GridFS is working"""
-    try:
-        # Try to list files
-        list(fs.find().limit(1))
-        return True
-    except:
-        return False
+@app.delete("/files/{filename}")
+async def delete_file(filename: str, user_id: str = Depends(get_current_user_id)):
+    """Delete a file and its chunks"""
+    from app.mongo_db import files_collection, collection, fs
 
-# Add cleanup endpoint (optional)
-@app.delete("/cleanup/{filename}")
-async def cleanup_file(filename: str):
-    """Delete a file and its chunks from MongoDB"""
+    # Find file
+    file_doc = files_collection.find_one({"filename": filename, "user_id": user_id})
+
+    if not file_doc:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    # Delete from GridFS
+    if file_doc.get("file_id"):
+        fs.delete(file_doc["file_id"])
+
+    # Delete metadata
+    files_collection.delete_one({"_id": file_doc["_id"]})
+
+    # Delete chunks
+    collection.delete_many({"file": filename, "user_id": user_id})
+
+    return {"message": f"File {filename} deleted successfully"}
+
+
+# ==================== Health Check ====================
+
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    from app.mongo_db import client
+
     try:
-        # Find file in GridFS
-        gridfs_file = fs.find_one({"filename": filename})
-        if gridfs_file:
-            # Delete from GridFS
-            fs.delete(gridfs_file._id)
-            
-            # Delete metadata
-            files_collection.delete_one({"filename": filename})
-            
-            # Delete all document chunks
-            collection.delete_many({"file": filename})
-            
-            return {"message": f"File {filename} and its data cleaned up successfully"}
-        else:
-            raise HTTPException(status_code=404, detail="File not found")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        client.admin.command("ping")
+        mongodb_status = "connected"
+    except:
+        mongodb_status = "disconnected"
+
+    return {
+        "status": "healthy",
+        "mongodb": mongodb_status,
+        "timestamp": datetime.utcnow(),
+    }
+
+
+
+
+================================================
+FILE: Backend/app/models.py
+================================================
+from pydantic import BaseModel, Field
+from typing import Optional, List, Dict, Any
+from datetime import datetime
+from enum import Enum
+
+class FileType(str, Enum):
+    PDF = "pdf"
+    DOCX = "docx"
+    TXT = "txt"
+    XLSX = "xlsx"
+    PPTX = "pptx"
+    IMAGE = "image"
+
+class MessageRole(str, Enum):
+    USER = "user"
+    ASSISTANT = "assistant"
+    SYSTEM = "system"
+
+class Message(BaseModel):
+    role: MessageRole
+    content: str
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    sources: Optional[List[Dict[str, Any]]] = None
+
+class ChatSession(BaseModel):
+    session_id: str
+    user_id: str
+    title: str
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    messages: List[Message] = []
+    files: List[str] = []  # List of filenames used in this session
+
+class ChatSessionCreate(BaseModel):
+    title: Optional[str] = None
+
+class ChatSessionResponse(BaseModel):
+    session_id: str
+    title: str
+    created_at: datetime
+    updated_at: datetime
+    message_count: int
+    file_count: int
+
+class ChatRequest(BaseModel):
+    session_id: Optional[str] = None
+    message: str
+    files: Optional[List[str]] = None  # Optional: specify which files to use
+
+class ChatResponse(BaseModel):
+    session_id: str
+    message: str
+    sources: List[Dict[str, Any]]
+    timestamp: datetime
+
+class FileUploadResponse(BaseModel):
+    filename: str
+    file_type: FileType
+    size: int
+    chunks_processed: int
+    session_id: Optional[str] = None
 
 
 ================================================
 FILE: Backend/app/mongo_db.py
 ================================================
-from pymongo import MongoClient
+from pymongo import MongoClient, ASCENDING, TEXT
 import gridfs
 import os
 from dotenv import load_dotenv
@@ -409,88 +1234,170 @@ except Exception as e:
     raise
 
 db = client["pdf_ai"]
+
+# Collections
 collection = db["documents"]
+users_collection = db["users"]
+files_collection = db["files"]
+sessions_collection = db["chat_sessions"]
+messages_collection = db["messages"]
+
+# Create indexes
+users_collection.create_index([("email", ASCENDING)], unique=True)
+
+# File indexes
+files_collection.create_index([
+    ("user_id", ASCENDING),
+    ("filename", ASCENDING)
+])
+files_collection.create_index([("session_id", ASCENDING)])
+files_collection.create_index([("upload_date", ASCENDING)])
+
+# Document chunks indexes
+collection.create_index([
+    ("user_id", ASCENDING),
+    ("file", ASCENDING)
+])
+collection.create_index([("session_id", ASCENDING)])
+collection.create_index([("timestamp", ASCENDING)])
+collection.create_index([("file_type", ASCENDING)])
+
+# Text search index for fallback
+collection.create_index([
+    ("text", TEXT)
+])
+
+# Chat sessions indexes
+sessions_collection.create_index([
+    ("user_id", ASCENDING),
+    ("updated_at", -1)
+])
+sessions_collection.create_index([("session_id", ASCENDING)], unique=True)
+
+# Messages indexes
+messages_collection.create_index([
+    ("session_id", ASCENDING),
+    ("timestamp", ASCENDING)
+])
 
 # Add GridFS for file storage
 fs = gridfs.GridFS(db)
-
-# Store file metadata
-files_collection = db["files"]
 
 
 ================================================
 FILE: Backend/app/query.py
 ================================================
 from app.vector_search import search_documents
+from app.chat_manager import ChatSessionManager
+from app.models import MessageRole
 from langchain_google_genai import ChatGoogleGenerativeAI
 import os
 from dotenv import load_dotenv
 import logging
+from typing import Optional, List
 
+# Setup logging
 load_dotenv()
 logger = logging.getLogger(__name__)
 
 # Initialize Gemini model
 try:
     model = ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash",  
+        model="gemini-2.5-flash",
         google_api_key=os.getenv("GOOGLE_API_KEY"),
         temperature=0.3,
-        max_tokens=500
+        max_tokens=1000
     )
     logger.info("Gemini model initialized successfully")
 except Exception as e:
     logger.error(f"Failed to initialize Gemini model: {e}")
     model = None
 
-def ask_question(question):
-    """Answer question using RAG pipeline"""
+async def ask_question(
+    question: str,
+    user_id: str,
+    session_id: Optional[str] = None,
+    files: Optional[List[str]] = None
+):
+    """Answer question using RAG pipeline with session support"""
     
     if not model:
+        logger.error("AI model not available")
         return {
             "answer": "AI model not available. Please check your Google API key.",
             "sources": []
         }
     
     try:
+        logger.info(f"Processing question for user {user_id}: {question[:100]}...")
+        
+        # Get conversation history if session exists
+        conversation_history = ""
+        if session_id:
+            logger.info(f"Getting session history for session {session_id}")
+            session = await ChatSessionManager.get_session(session_id, user_id)
+            if session and session.get("messages"):
+                # Get last 5 messages for context
+                recent_messages = session["messages"][-5:]
+                for msg in recent_messages:
+                    role = "User" if msg["role"] == "user" else "Assistant"
+                    conversation_history += f"{role}: {msg['content']}\n"
+                logger.info(f"Found {len(recent_messages)} recent messages")
+        
         # Search for relevant documents
-        docs = search_documents(question)
+        logger.info(f"Searching documents for query")
+        docs = search_documents(
+            query=question,
+            user_id=user_id,
+            session_id=session_id,
+            files=files
+        )
         
         if not docs:
+            logger.warning("No relevant documents found")
             return {
-                "answer": "No relevant documents found. Please upload a PDF first.",
+                "answer": "No relevant documents found. Please upload files first.",
                 "sources": []
             }
+        
+        logger.info(f"Found {len(docs)} relevant documents")
         
         # Prepare context
         context = ""
         sources = []
         
         for doc in docs:
-            context += f"\nFrom {doc['file']} (Page {doc['page']}):\n{doc['text']}\n"
+            context += f"\nFrom {doc['file']} (Type: {doc.get('file_type', 'unknown')}):\n{doc['text']}\n"
             sources.append({
                 "file": doc["file"],
-                "page": doc["page"],
-                "score": doc.get("score")
+                "file_type": doc.get("file_type", "unknown"),
+                "score": doc.get("score"),
+                "text_snippet": doc["text"][:200] + "..." if len(doc["text"]) > 200 else doc["text"]
             })
         
-        # Create prompt
+        # Create prompt with conversation history
         prompt = f"""You are a helpful assistant that answers questions based on the provided context.
-        
-Context:
+
+Conversation History:
+{conversation_history if conversation_history else "No previous conversation."}
+
+Current Context from uploaded files:
 {context}
 
-Question: {question}
+Current Question: {question}
 
 Instructions:
-1. Answer based only on the provided context
-2. If the answer isn't in the context, say "I cannot find this information in the provided documents"
+1. Answer based only on the provided context and conversation history
+2. If the answer isn't in the context, say "I cannot find this information in the uploaded files"
 3. Be concise and accurate
+4. Reference which file you're getting information from when possible
 
 Answer:"""
 
         # Get response from Gemini
+        logger.info("Sending prompt to Gemini")
         response = model.invoke(prompt)
+        logger.info("Received response from Gemini")
         
         return {
             "answer": response.content,
@@ -498,7 +1405,7 @@ Answer:"""
         }
         
     except Exception as e:
-        logger.error(f"Question answering failed: {e}")
+        logger.error(f"Question answering failed: {str(e)}")
         return {
             "answer": f"Error processing question: {str(e)}",
             "sources": []
@@ -509,20 +1416,29 @@ Answer:"""
 FILE: Backend/app/vector_search.py
 ================================================
 from app.mongo_db import collection
-from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.embeddings import HuggingFaceEmbeddings
 import logging
+from typing import List, Dict, Any, Optional
 
+# Setup logger
 logger = logging.getLogger(__name__)
 
 try:
     embeddings = HuggingFaceEmbeddings(
         model_name="sentence-transformers/all-MiniLM-L6-v2"
     )
+    logger.info("Embeddings model loaded successfully")
 except Exception as e:
     logger.error(f"Failed to load embeddings: {e}")
     raise
 
-def search_documents(query, limit=3):
+def search_documents(
+    query: str,
+    user_id: str,
+    session_id: Optional[str] = None,
+    files: Optional[List[str]] = None,
+    limit: int = 5
+) -> List[Dict[str, Any]]:
     """Search for relevant documents using vector similarity"""
     
     if not query or not query.strip():
@@ -532,24 +1448,46 @@ def search_documents(query, limit=3):
         # Generate query embedding
         query_vector = embeddings.embed_query(query)
         
-        # MongoDB vector search pipeline
+        # MongoDB vector search pipeline WITHOUT filter first (using post-filtering)
         pipeline = [
             {
                 "$vectorSearch": {
-                    "index": "vector_index",  # Make sure this index exists in MongoDB
+                    "index": "vector_index",
                     "path": "embedding",
                     "queryVector": query_vector,
                     "numCandidates": 100,
-                    "limit": limit
+                    "limit": limit * 5  # Request more candidates since we'll filter later
                 }
             },
+            # Then filter the results by user_id
+            {
+                "$match": {
+                    "user_id": user_id
+                }
+            },
+            # Add session_id filter if provided
+            *([{
+                "$match": {
+                    "session_id": session_id
+                }
+            }] if session_id else []),
+            # Add files filter if provided
+            *([{
+                "$match": {
+                    "file": {"$in": files}
+                }
+            }] if files else []),
             {
                 "$project": {
                     "text": 1,
-                    "page": 1,
+                    "metadata": 1,
                     "file": 1,
+                    "file_type": 1,
                     "score": {"$meta": "vectorSearchScore"}
                 }
+            },
+            {
+                "$limit": limit  # Final limit after filtering
             }
         ]
         
@@ -561,37 +1499,65 @@ def search_documents(query, limit=3):
         for r in results:
             docs.append({
                 "text": r.get("text", ""),
-                "page": r.get("page", 0),
+                "metadata": r.get("metadata", {}),
                 "file": r.get("file", "unknown"),
+                "file_type": r.get("file_type", "unknown"),
                 "score": r.get("score", 0)
             })
         
-        logger.info(f"Found {len(docs)} relevant documents for query")
+        logger.info(f"Found {len(docs)} relevant documents for user {user_id}")
+        
+        # If no results found with vector search, try fallback
+        if not docs:
+            logger.info("No vector search results, trying fallback text search")
+            return fallback_text_search(query, user_id, session_id, files, limit)
+            
         return docs
         
     except Exception as e:
-        logger.error(f"Vector search failed: {e}")
-        # Fallback to text search if vector search fails
-        return fallback_text_search(query, limit)
+        logger.error(f"Vector search failed: {str(e)}")
+        # Fallback to text search
+        return fallback_text_search(query, user_id, session_id, files, limit)
 
-def fallback_text_search(query, limit=3):
+def fallback_text_search(
+    query: str,
+    user_id: str,
+    session_id: Optional[str] = None,
+    files: Optional[List[str]] = None,
+    limit: int = 3
+) -> List[Dict[str, Any]]:
     """Fallback text search if vector search fails"""
     try:
-        results = collection.find(
-            {"text": {"$regex": query, "$options": "i"}}
-        ).limit(limit)
+        logger.info(f"Performing fallback text search for query: {query[:50]}...")
+        
+        # Build filter
+        filter_conditions = {
+            "text": {"$regex": query, "$options": "i"},
+            "user_id": user_id
+        }
+        
+        if session_id:
+            filter_conditions["session_id"] = session_id
+        
+        if files:
+            filter_conditions["file"] = {"$in": files}
+        
+        results = collection.find(filter_conditions).limit(limit)
         
         docs = []
         for r in results:
             docs.append({
                 "text": r.get("text", ""),
-                "page": r.get("page", 0),
-                "file": r.get("file", "unknown")
+                "metadata": r.get("metadata", {}),
+                "file": r.get("file", "unknown"),
+                "file_type": r.get("file_type", "unknown")
             })
         
+        logger.info(f"Fallback search found {len(docs)} documents")
         return docs
+        
     except Exception as e:
-        logger.error(f"Fallback search failed: {e}")
+        logger.error(f"Fallback search failed: {str(e)}")
         return []
 
 
@@ -704,6 +1670,9 @@ FILE: Frontend/package.json
     "postcss": "^8.5.8",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
+    "react-dropzone": "^15.0.0",
+    "react-markdown": "^10.1.0",
+    "react-router-dom": "^7.13.1",
     "tailwindcss": "^4.2.1"
   },
   "devDependencies": {
@@ -753,357 +1722,59 @@ FILE: Frontend/src/App.css
 ================================================
 FILE: Frontend/src/App.jsx
 ================================================
-import { useState } from "react";
-import { uploadPDF } from "./api/upload";
-import { askQuestion } from "./api/ask";
-import {
-  FileText,
-  Upload,
-  MessageSquare,
-  Send,
-  CheckCircle,
-  AlertCircle,
-  Loader,
-  Sparkles,
-  BookOpen
-} from 'lucide-react';
-
-function App() {
-  const [file, setFile] = useState(null);
-  const [question, setQuestion] = useState("");
-  const [answer, setAnswer] = useState("");
-  const [sources, setSources] = useState([]);
-  const [uploading, setUploading] = useState(false);
-  const [asking, setAsking] = useState(false);
-  const [uploadStatus, setUploadStatus] = useState(null);
-  const [fileName, setFileName] = useState("");
-
-  const handleFileChange = (e) => {
-    const selectedFile = e.target.files[0];
-    
-    // Validate file type
-    if (selectedFile && !selectedFile.name.toLowerCase().endsWith('.pdf')) {
-      alert('Please select a PDF file');
-      e.target.value = ''; // Clear the input
-      return;
-    }
-    
-    // Validate file size (max 10MB)
-    if (selectedFile && selectedFile.size > 10 * 1024 * 1024) {
-      alert('File size too large. Maximum size is 10MB');
-      e.target.value = '';
-      return;
-    }
-    
-    setFile(selectedFile);
-    setFileName(selectedFile?.name || "");
-    setUploadStatus(null);
-  };
-
-  const handleUpload = async () => {
-    if (!file) {
-      alert("Please select a file first");
-      return;
-    }
-
-    setUploading(true);
-    setUploadStatus(null);
-
-    try {
-      const res = await uploadPDF(file);
-      setUploadStatus({ 
-        success: true, 
-        message: res.message || "PDF uploaded successfully!" 
-      });
-      // Clear the file input after successful upload
-      setFile(null);
-      setFileName("");
-      // Reset file input
-      document.querySelector('input[type="file"]').value = '';
-    } catch (error) {
-      setUploadStatus({ 
-        success: false, 
-        message: error.message || "Upload failed" 
-      });
-    } finally {
-      setUploading(false);
-    }
-  };
-
-  const handleAsk = async () => {
-    if (!question.trim()) {
-      alert("Please enter a question");
-      return;
-    }
-
-    setAsking(true);
-    setAnswer("");
-    setSources([]);
-
-    try {
-      const res = await askQuestion(question);
-      setAnswer(res.answer || "No answer received");
-      setSources(res.sources || []);
-    } catch (error) {
-      setAnswer("Error: " + (error.message || "Failed to get answer"));
-      setSources([]);
-    } finally {
-      setAsking(false);
-    }
-  };
-
-  // Handle Enter key press (Shift+Enter for new line, Enter to submit)
-  const handleKeyDown = (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleAsk();
-    }
-  };
-
-  return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100">
-      {/* Header */}
-      <header className="bg-white shadow-sm border-b">
-        <div className="max-w-6xl mx-auto px-4 py-6">
-          <div className="flex items-center gap-3">
-            <div className="bg-blue-600 p-3 rounded-xl">
-              <Sparkles className="h-8 w-8 text-white" />
-            </div>
-            <div>
-              <h1 className="text-3xl font-bold text-gray-900">PDF AI Assistant</h1>
-              <p className="text-gray-600">Upload PDFs and ask questions using AI</p>
-            </div>
-          </div>
-        </div>
-      </header>
-
-      {/* Main Content */}
-      <main className="max-w-6xl mx-auto px-4 py-8">
-        <div className="grid md:grid-cols-2 gap-8">
-          {/* Left Column - Upload Section */}
-          <div className="bg-white rounded-2xl shadow-lg p-6 border border-gray-100">
-            <div className="flex items-center gap-2 mb-6">
-              <div className="bg-blue-100 p-2 rounded-lg">
-                <FileText className="h-5 w-5 text-blue-600" />
-              </div>
-              <h2 className="text-xl font-semibold text-gray-800">Upload PDF</h2>
-            </div>
-
-            {/* Upload Area */}
-            <div className="border-2 border-dashed border-gray-300 rounded-xl p-8 text-center hover:border-blue-500 transition-colors">
-              <Upload className="h-12 w-12 text-gray-400 mx-auto mb-4" />
-
-              <label className="cursor-pointer">
-                <span className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors inline-block">
-                  Choose File
-                </span>
-                <input
-                  type="file"
-                  accept=".pdf"
-                  onChange={handleFileChange}
-                  className="hidden"
-                />
-              </label>
-
-              {fileName && (
-                <div className="mt-4 flex items-center justify-center gap-2 text-sm text-gray-600">
-                  <FileText className="h-4 w-4" />
-                  <span className="truncate max-w-[200px]">{fileName}</span>
-                </div>
-              )}
-              
-              <p className="text-xs text-gray-400 mt-2">Maximum file size: 10MB</p>
-            </div>
-
-            {/* Upload Button */}
-            <button
-              onClick={handleUpload}
-              disabled={!file || uploading}
-              className={`w-full mt-4 py-3 px-4 rounded-lg font-medium flex items-center justify-center gap-2 transition-all ${
-                !file || uploading
-                  ? "bg-gray-300 text-gray-500 cursor-not-allowed"
-                  : "bg-blue-600 text-white hover:bg-blue-700 hover:shadow-lg"
-              }`}
-            >
-              {uploading ? (
-                <>
-                  <Loader className="animate-spin" size={18} />
-                  Uploading...
-                </>
-              ) : (
-                <>
-                  <Upload size={18} />
-                  Upload PDF
-                </>
-              )}
-            </button>
-
-            {/* Upload Status */}
-            {uploadStatus && (
-              <div className={`mt-4 p-4 rounded-lg flex items-start gap-3 ${
-                uploadStatus.success ? 'bg-green-50' : 'bg-red-50'
-              }`}>
-                {uploadStatus.success ? (
-                  <CheckCircle className="h-5 w-5 text-green-600 mt-0.5 flex-shrink-0" />
-                ) : (
-                  <AlertCircle className="h-5 w-5 text-red-600 mt-0.5 flex-shrink-0" />
-                )}
-                <div>
-                  <p className={`font-medium ${
-                    uploadStatus.success ? 'text-green-800' : 'text-red-800'
-                  }`}>
-                    {uploadStatus.success ? 'Success!' : 'Error!'}
-                  </p>
-                  <p className={`text-sm ${
-                    uploadStatus.success ? 'text-green-600' : 'text-red-600'
-                  }`}>
-                    {uploadStatus.message}
-                  </p>
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* Right Column - Question Section */}
-          <div className="bg-white rounded-2xl shadow-lg p-6 border border-gray-100">
-            <div className="flex items-center gap-2 mb-6">
-              <div className="bg-purple-100 p-2 rounded-lg">
-                <MessageSquare className="h-5 w-5 text-purple-600" />
-              </div>
-              <h2 className="text-xl font-semibold text-gray-800">Ask Question</h2>
-            </div>
-
-            {/* Question Input */}
-            <div className="space-y-4">
-              <div className="relative">
-                <textarea
-                  value={question}
-                  onChange={(e) => {
-                    // Limit to 500 characters
-                    if (e.target.value.length <= 500) {
-                      setQuestion(e.target.value);
-                    }
-                  }}
-                  onKeyDown={handleKeyDown}
-                  placeholder="Ask something about your PDF... (Press Enter to submit, Shift+Enter for new line)"
-                  className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none"
-                  rows="4"
-                />
-                <div className="absolute bottom-3 right-3 text-xs text-gray-400">
-                  {question.length}/500
-                </div>
-              </div>
-
-              <button
-                onClick={handleAsk}
-                disabled={!question.trim() || asking}
-                className={`w-full py-3 px-4 rounded-lg font-medium flex items-center justify-center gap-2 transition-all ${
-                  !question.trim() || asking
-                    ? "bg-gray-300 text-gray-500 cursor-not-allowed"
-                    : "bg-purple-600 text-white hover:bg-purple-700 hover:shadow-lg"
-                }`}
-              >
-                {asking ? (
-                  <>
-                    <Loader className="animate-spin" size={18} />
-                    Processing...
-                  </>
-                ) : (
-                  <>
-                    <Send size={18} />
-                    Ask Question
-                  </>
-                )}
-              </button>
-            </div>
-
-            {/* Answer Section */}
-            {(answer || asking || sources.length > 0) && (
-              <div className="mt-6 border-t pt-6">
-                <h3 className="text-lg font-semibold text-gray-800 mb-3 flex items-center gap-2">
-                  <Sparkles className="h-5 w-5 text-purple-600" />
-                  Answer
-                </h3>
-
-                <div className="bg-gray-50 rounded-lg p-4 min-h-[100px] mb-4">
-                  {asking ? (
-                    <div className="flex items-center justify-center h-full">
-                      <div className="text-center">
-                        <Loader className="animate-spin h-8 w-8 text-purple-600 mx-auto mb-2" />
-                        <p className="text-gray-500">Getting answer...</p>
-                      </div>
-                    </div>
-                  ) : (
-                    <p className="text-gray-700 whitespace-pre-wrap">
-                      {answer || "No answer yet. Ask a question above!"}
-                    </p>
-                  )}
-                </div>
-
-                {/* Sources Section - FIXED */}
-                {sources && sources.length > 0 && (
-                  <div className="bg-blue-50 rounded-lg p-4">
-                    <h4 className="text-sm font-semibold text-blue-800 mb-2 flex items-center gap-2">
-                      <BookOpen className="h-4 w-4" />
-                      Sources Used
-                    </h4>
-                    <div className="flex flex-wrap gap-2">
-                      {sources.map((source, index) => (
-                        <span
-                          key={index}
-                          className="bg-white text-blue-700 px-3 py-1 rounded-full text-xs font-medium border border-blue-200 shadow-sm flex items-center gap-1"
-                        >
-                          <FileText className="h-3 w-3" />
-                          {/* FIXED: Display page number correctly */}
-                          Page {source.page || 'N/A'}
-                          {source.file && (
-                            <span className="text-blue-400">â€¢ {source.file.split('/').pop()}</span>
-                          )}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Footer */}
-        <div className="mt-8 text-center text-sm text-gray-500">
-          Powered by AI â€¢ Upload PDF and ask questions about its content
-        </div>
-      </main>
-    </div>
-  );
-}
-
-export default App;
+Error reading file with 'cp1252': 'charmap' codec can't decode byte 0x9d in position 5195: character maps to <undefined>
 
 
 ================================================
 FILE: Frontend/src/index.css
 ================================================
-
 @import "tailwindcss";
 
 @layer base {
   body {
     @apply antialiased;
+    overflow: hidden;
   }
 }
 
 @layer components {
-  .btn-primary {
-    @apply bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors;
+  /* Custom scrollbar */
+  .overflow-y-auto::-webkit-scrollbar {
+    width: 8px;
   }
-  
-  .btn-secondary {
-    @apply bg-gray-200 text-gray-800 px-4 py-2 rounded-lg hover:bg-gray-300 transition-colors;
+
+  .overflow-y-auto::-webkit-scrollbar-track {
+    @apply bg-gray-100;
   }
-  
-  .input-field {
-    @apply w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent;
+
+  .overflow-y-auto::-webkit-scrollbar-thumb {
+    @apply bg-gray-300 rounded-full;
+  }
+
+  .overflow-y-auto::-webkit-scrollbar-thumb:hover {
+    @apply bg-gray-400;
+  }
+
+  /* Message animations */
+  .message-enter {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+
+  .message-enter-active {
+    opacity: 1;
+    transform: translateY(0);
+    transition: opacity 300ms, transform 300ms;
+  }
+
+  /* File upload preview */
+  .file-preview {
+    @apply bg-gray-50 rounded-lg p-2;
+  }
+
+  /* Loading spinner */
+  .loading-spinner {
+    @apply animate-spin rounded-full border-2 border-gray-300 border-t-blue-600;
   }
 }
 
@@ -1113,15 +1784,33 @@ FILE: Frontend/src/main.jsx
 ================================================
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
+import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import './index.css'
 import App from './App.jsx'
+import Login from './pages/Login.jsx'
+import Signup from './pages/Signup.jsx'
+import { AuthProvider } from './context/AuthContext'
+import ProtectedRoute from './components/ProtectedRoute'
+import Navbar from './components/Navbar'
 
 createRoot(document.getElementById('root')).render(
   <StrictMode>
-    <App />
+    <BrowserRouter>
+      <AuthProvider>
+        <Navbar />
+        <Routes>
+          <Route path="/login" element={<Login />} />
+          <Route path="/signup" element={<Signup />} />
+          <Route path="/" element={
+            <ProtectedRoute>
+              <App />
+            </ProtectedRoute>
+          } />
+        </Routes>
+      </AuthProvider>
+    </BrowserRouter>
   </StrictMode>,
 )
-
 
 
 ================================================
@@ -1143,6 +1832,13 @@ API.interceptors.response.use(
         if (!error.response) {
             console.error('Network error - backend not reachable');
             return Promise.reject(new Error('Cannot connect to server. Make sure backend is running.'));
+        }
+        // Handle 401 Unauthorized - token expired or invalid
+        if (error.response?.status === 401) {
+            // Clear token and redirect to login
+            localStorage.removeItem('token');
+            delete API.defaults.headers.common['Authorization'];
+            window.location.href = '/login';
         }
         return Promise.reject(error);
     }
@@ -1189,35 +1885,658 @@ export const askQuestion = async (question) => {
 
 
 ================================================
+FILE: Frontend/src/api/chat.js
+================================================
+import API from "./api";
+
+export const getSessions = async () => {
+    try {
+        const response = await API.get('/sessions');
+        return response.data;
+    } catch (error) {
+        console.error('Failed to fetch sessions:', error);
+        throw error;
+    }
+};
+
+export const getSession = async (sessionId) => {
+    try {
+        const response = await API.get(`/sessions/${sessionId}`);
+        return response.data;
+    } catch (error) {
+        console.error('Failed to fetch session:', error);
+        throw error;
+    }
+};
+
+export const createSession = async (title = null) => {
+    try {
+        const response = await API.post('/sessions', null, {
+            params: { title }
+        });
+        return response.data;
+    } catch (error) {
+        console.error('Failed to create session:', error);
+        throw error;
+    }
+};
+
+export const deleteSession = async (sessionId) => {
+    try {
+        const response = await API.delete(`/sessions/${sessionId}`);
+        return response.data;
+    } catch (error) {
+        console.error('Failed to delete session:', error);
+        throw error;
+    }
+};
+
+export const sendMessage = async (sessionId, message, files = []) => {
+    try {
+        const response = await API.post('/chat', {
+            session_id: sessionId,
+            message: message,
+            files: files
+        });
+        return response.data;
+    } catch (error) {
+        console.error('Failed to send message:', error);
+        throw error;
+    }
+};
+
+
+================================================
 FILE: Frontend/src/api/upload.js
 ================================================
 import API from "./api";
 
-export const uploadPDF = async (file) => {
+export const uploadFile = async (file, sessionId = null) => {
     try {
         const formData = new FormData();
         formData.append('file', file);
+        
+        if (sessionId) {
+            formData.append('session_id', sessionId);
+        }
 
-        const res = await API.post('/upload', formData, {
+        const response = await API.post('/upload', formData, {
             headers: {
                 "Content-Type": "multipart/form-data"
+            },
+            onUploadProgress: (progressEvent) => {
+                const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+                // You can handle progress here if needed
             }
         });
         
-        return res.data;
+        return response.data;
     } catch (error) {
-        // Enhanced error handling
-        if (error.response) {
-            // The request was made and the server responded with a status code
-            // that falls out of the range of 2xx
-            throw new Error(error.response.data?.detail || `Upload failed: ${error.response.status}`);
-        } else if (error.request) {
-            // The request was made but no response was received
-            throw new Error('No response from server. Is the backend running?');
-        } else {
-            // Something happened in setting up the request that triggered an Error
-            throw new Error(error.message || 'Upload failed');
-        }
+        console.error('Upload failed:', error);
+        throw error;
     }
 };
+
+export const getUserFiles = async (sessionId = null) => {
+    try {
+        const response = await API.get('/files', {
+            params: { session_id: sessionId }
+        });
+        return response.data;
+    } catch (error) {
+        console.error('Failed to fetch files:', error);
+        throw error;
+    }
+};
+
+export const deleteFile = async (filename) => {
+    try {
+        const response = await API.delete(`/files/${filename}`);
+        return response.data;
+    } catch (error) {
+        console.error('Failed to delete file:', error);
+        throw error;
+    }
+};
+
+
+================================================
+FILE: Frontend/src/components/Navbar.jsx
+================================================
+import { useAuth } from '../context/AuthContext';
+import { Link, useNavigate } from 'react-router-dom';
+import { Sparkles, LogOut, User } from 'lucide-react';
+
+export default function Navbar() {
+    const { user, logout, isAuthenticated } = useAuth();
+    const navigate = useNavigate();
+
+    const handleLogout = () => {
+        logout();
+        navigate('/login');
+    };
+
+    if (!isAuthenticated) return null;
+
+    return (
+        <nav className="bg-white shadow-sm border-b">
+            <div className="max-w-6xl mx-auto px-4 py-3">
+                <div className="flex items-center justify-between">
+                    <Link to="/" className="flex items-center gap-2">
+                        <div className="bg-blue-600 p-2 rounded-lg">
+                            <Sparkles className="h-5 w-5 text-white" />
+                        </div>
+                        <span className="font-semibold text-gray-900">PDF AI Assistant</span>
+                    </Link>
+
+                    <div className="flex items-center gap-4">
+                        <div className="flex items-center gap-2 text-sm text-gray-600">
+                            <User className="h-4 w-4" />
+                            <span>{user?.email}</span>
+                        </div>
+                        <button
+                            onClick={handleLogout}
+                            className="flex items-center gap-2 px-3 py-2 text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors"
+                        >
+                            <LogOut className="h-4 w-4" />
+                            Logout
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </nav>
+    );
+}
+
+
+================================================
+FILE: Frontend/src/components/ProtectedRoute.jsx
+================================================
+import { Navigate } from 'react-router-dom';
+import { useAuth } from '../context/AuthContext';
+
+export default function ProtectedRoute({ children }) {
+    const { isAuthenticated, loading } = useAuth();
+
+    if (loading) {
+        return (
+            <div className="min-h-screen flex items-center justify-center">
+                <div className="text-center">
+                    <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
+                    <p className="text-gray-600">Loading...</p>
+                </div>
+            </div>
+        );
+    }
+
+    if (!isAuthenticated) {
+        return <Navigate to="/login" replace />;
+    }
+
+    return children;
+}
+
+
+================================================
+FILE: Frontend/src/context/AuthContext.jsx
+================================================
+import { createContext, useState, useContext, useEffect } from 'react';
+import API from '../api/api';
+
+const AuthContext = createContext(null);
+
+export const useAuth = () => {
+    const context = useContext(AuthContext);
+    if (!context) {
+        throw new Error('useAuth must be used within an AuthProvider');
+    }
+    return context;
+};
+
+export const AuthProvider = ({ children }) => {
+    const [user, setUser] = useState(null);
+    const [loading, setLoading] = useState(true);
+    const [token, setToken] = useState(localStorage.getItem('token'));
+
+    useEffect(() => {
+        if (token) {
+            // Set default authorization header
+            API.defaults.headers.common['Authorization'] = `Bearer ${token}`;
+            fetchUser();
+        } else {
+            setLoading(false);
+        }
+    }, [token]);
+
+    const fetchUser = async () => {
+        try {
+            const response = await API.get('/auth/me');
+            setUser(response.data);
+        } catch (error) {
+            console.error('Failed to fetch user:', error);
+            logout();
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const login = async (email, password) => {
+        try {
+            // Using form data for OAuth2 compatible endpoint
+            const formData = new FormData();
+            formData.append('username', email);
+            formData.append('password', password);
+
+            const response = await API.post('/auth/login', formData, {
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                }
+            });
+
+            const { access_token, user } = response.data;
+            
+            localStorage.setItem('token', access_token);
+            API.defaults.headers.common['Authorization'] = `Bearer ${access_token}`;
+            setToken(access_token);
+            setUser(user);
+            
+            return { success: true };
+        } catch (error) {
+            return {
+                success: false,
+                error: error.response?.data?.detail || 'Login failed'
+            };
+        }
+    };
+
+    const signup = async (email, password) => {
+        try {
+            const response = await API.post('/auth/signup', {
+                email,
+                password
+            });
+
+            const { access_token, user } = response.data;
+            
+            localStorage.setItem('token', access_token);
+            API.defaults.headers.common['Authorization'] = `Bearer ${access_token}`;
+            setToken(access_token);
+            setUser(user);
+            
+            return { success: true };
+        } catch (error) {
+            return {
+                success: false,
+                error: error.response?.data?.detail || 'Signup failed'
+            };
+        }
+    };
+
+    const logout = () => {
+        localStorage.removeItem('token');
+        delete API.defaults.headers.common['Authorization'];
+        setToken(null);
+        setUser(null);
+    };
+
+    const value = {
+        user,
+        loading,
+        login,
+        signup,
+        logout,
+        isAuthenticated: !!user
+    };
+
+    return (
+        <AuthContext.Provider value={value}>
+            {children}
+        </AuthContext.Provider>
+    );
+};
+
+
+================================================
+FILE: Frontend/src/pages/Login.jsx
+================================================
+import { useState } from 'react';
+import { useAuth } from '../context/AuthContext';
+import { Link, useNavigate } from 'react-router-dom';
+import { Mail, Lock, LogIn, AlertCircle, Sparkles } from 'lucide-react';
+
+export default function Login() {
+    const [email, setEmail] = useState('');
+    const [password, setPassword] = useState('');
+    const [error, setError] = useState('');
+    const [loading, setLoading] = useState(false);
+    
+    const { login } = useAuth();
+    const navigate = useNavigate();
+
+    const handleSubmit = async (e) => {
+        e.preventDefault();
+        setError('');
+        setLoading(true);
+
+        const result = await login(email, password);
+        
+        if (result.success) {
+            navigate('/');
+        } else {
+            setError(result.error);
+        }
+        
+        setLoading(false);
+    };
+
+    return (
+        <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-4">
+            <div className="bg-white rounded-2xl shadow-xl max-w-md w-full p-8">
+                {/* Header */}
+                <div className="text-center mb-8">
+                    <div className="bg-blue-600 p-3 rounded-xl inline-block mb-4">
+                        <Sparkles className="h-8 w-8 text-white" />
+                    </div>
+                    <h1 className="text-3xl font-bold text-gray-900">Welcome Back</h1>
+                    <p className="text-gray-600 mt-2">Sign in to your account</p>
+                </div>
+
+                {/* Error Message */}
+                {error && (
+                    <div className="mb-6 p-4 bg-red-50 rounded-lg flex items-start gap-3">
+                        <AlertCircle className="h-5 w-5 text-red-600 mt-0.5 flex-shrink-0" />
+                        <p className="text-sm text-red-600">{error}</p>
+                    </div>
+                )}
+
+                {/* Login Form */}
+                <form onSubmit={handleSubmit} className="space-y-6">
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">
+                            Email Address
+                        </label>
+                        <div className="relative">
+                            <Mail className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
+                            <input
+                                type="email"
+                                value={email}
+                                onChange={(e) => setEmail(e.target.value)}
+                                className="w-full pl-10 pr-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                                placeholder="you@example.com"
+                                required
+                                disabled={loading}
+                            />
+                        </div>
+                    </div>
+
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">
+                            Password
+                        </label>
+                        <div className="relative">
+                            <Lock className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
+                            <input
+                                type="password"
+                                value={password}
+                                onChange={(e) => setPassword(e.target.value)}
+                                className="w-full pl-10 pr-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                                placeholder="â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢"
+                                required
+                                disabled={loading}
+                                minLength={6}
+                            />
+                        </div>
+                    </div>
+
+                    <button
+                        type="submit"
+                        disabled={loading}
+                        className={`w-full py-3 px-4 rounded-lg font-medium flex items-center justify-center gap-2 transition-all ${
+                            loading
+                                ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                                : 'bg-blue-600 text-white hover:bg-blue-700 hover:shadow-lg'
+                        }`}
+                    >
+                        {loading ? (
+                            <>
+                                <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>
+                                Signing in...
+                            </>
+                        ) : (
+                            <>
+                                <LogIn size={18} />
+                                Sign In
+                            </>
+                        )}
+                    </button>
+                </form>
+
+                {/* Signup Link */}
+                <p className="mt-6 text-center text-gray-600">
+                    Don't have an account?{' '}
+                    <Link to="/signup" className="text-blue-600 hover:text-blue-700 font-medium">
+                        Sign up
+                    </Link>
+                </p>
+            </div>
+        </div>
+    );
+}
+
+
+================================================
+FILE: Frontend/src/pages/Signup.jsx
+================================================
+import { useState } from 'react';
+import { useAuth } from '../context/AuthContext';
+import { Link, useNavigate } from 'react-router-dom';
+import { Mail, Lock, UserPlus, AlertCircle, Sparkles, CheckCircle } from 'lucide-react';
+
+export default function Signup() {
+    const [email, setEmail] = useState('');
+    const [password, setPassword] = useState('');
+    const [confirmPassword, setConfirmPassword] = useState('');
+    const [error, setError] = useState('');
+    const [loading, setLoading] = useState(false);
+    
+    const { signup } = useAuth();
+    const navigate = useNavigate();
+
+    const validatePassword = () => {
+        if (password.length < 6) {
+            return 'Password must be at least 6 characters';
+        }
+        if (password !== confirmPassword) {
+            return 'Passwords do not match';
+        }
+        return null;
+    };
+
+    const handleSubmit = async (e) => {
+        e.preventDefault();
+        
+        const passwordError = validatePassword();
+        if (passwordError) {
+            setError(passwordError);
+            return;
+        }
+
+        setError('');
+        setLoading(true);
+
+        const result = await signup(email, password);
+        
+        if (result.success) {
+            navigate('/');
+        } else {
+            setError(result.error);
+        }
+        
+        setLoading(false);
+    };
+
+    const getPasswordStrength = () => {
+        if (!password) return null;
+        
+        const hasLower = /[a-z]/.test(password);
+        const hasUpper = /[A-Z]/.test(password);
+        const hasNumber = /[0-9]/.test(password);
+        const hasSpecial = /[^A-Za-z0-9]/.test(password);
+        
+        const strength = [hasLower, hasUpper, hasNumber, hasSpecial].filter(Boolean).length;
+        
+        if (strength < 2) return 'weak';
+        if (strength < 4) return 'medium';
+        return 'strong';
+    };
+
+    const passwordStrength = getPasswordStrength();
+
+    return (
+        <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-4">
+            <div className="bg-white rounded-2xl shadow-xl max-w-md w-full p-8">
+                {/* Header */}
+                <div className="text-center mb-8">
+                    <div className="bg-blue-600 p-3 rounded-xl inline-block mb-4">
+                        <Sparkles className="h-8 w-8 text-white" />
+                    </div>
+                    <h1 className="text-3xl font-bold text-gray-900">Create Account</h1>
+                    <p className="text-gray-600 mt-2">Sign up to get started</p>
+                </div>
+
+                {/* Error Message */}
+                {error && (
+                    <div className="mb-6 p-4 bg-red-50 rounded-lg flex items-start gap-3">
+                        <AlertCircle className="h-5 w-5 text-red-600 mt-0.5 flex-shrink-0" />
+                        <p className="text-sm text-red-600">{error}</p>
+                    </div>
+                )}
+
+                {/* Signup Form */}
+                <form onSubmit={handleSubmit} className="space-y-6">
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">
+                            Email Address
+                        </label>
+                        <div className="relative">
+                            <Mail className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
+                            <input
+                                type="email"
+                                value={email}
+                                onChange={(e) => setEmail(e.target.value)}
+                                className="w-full pl-10 pr-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                                placeholder="you@example.com"
+                                required
+                                disabled={loading}
+                            />
+                        </div>
+                    </div>
+
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">
+                            Password
+                        </label>
+                        <div className="relative">
+                            <Lock className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
+                            <input
+                                type="password"
+                                value={password}
+                                onChange={(e) => setPassword(e.target.value)}
+                                className="w-full pl-10 pr-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                                placeholder="â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢"
+                                required
+                                disabled={loading}
+                                minLength={6}
+                            />
+                        </div>
+                        
+                        {/* Password strength indicator */}
+                        {password && (
+                            <div className="mt-2">
+                                <div className="flex gap-1 mb-1">
+                                    <div className={`h-1 flex-1 rounded ${
+                                        passwordStrength === 'weak' ? 'bg-red-500' :
+                                        passwordStrength === 'medium' ? 'bg-yellow-500' :
+                                        passwordStrength === 'strong' ? 'bg-green-500' : 'bg-gray-200'
+                                    }`} />
+                                    <div className={`h-1 flex-1 rounded ${
+                                        passwordStrength === 'medium' ? 'bg-yellow-500' :
+                                        passwordStrength === 'strong' ? 'bg-green-500' : 'bg-gray-200'
+                                    }`} />
+                                    <div className={`h-1 flex-1 rounded ${
+                                        passwordStrength === 'strong' ? 'bg-green-500' : 'bg-gray-200'
+                                    }`} />
+                                </div>
+                                <p className="text-xs text-gray-500">
+                                    {passwordStrength === 'weak' && 'Weak password'}
+                                    {passwordStrength === 'medium' && 'Medium password'}
+                                    {passwordStrength === 'strong' && 'Strong password'}
+                                </p>
+                            </div>
+                        )}
+                    </div>
+
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">
+                            Confirm Password
+                        </label>
+                        <div className="relative">
+                            <Lock className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
+                            <input
+                                type="password"
+                                value={confirmPassword}
+                                onChange={(e) => setConfirmPassword(e.target.value)}
+                                className={`w-full pl-10 pr-4 py-3 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent ${
+                                    confirmPassword && password !== confirmPassword
+                                        ? 'border-red-300 bg-red-50'
+                                        : 'border-gray-300'
+                                }`}
+                                placeholder="â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢"
+                                required
+                                disabled={loading}
+                                minLength={6}
+                            />
+                        </div>
+                        {confirmPassword && password === confirmPassword && (
+                            <p className="mt-1 text-xs text-green-600 flex items-center gap-1">
+                                <CheckCircle className="h-3 w-3" />
+                                Passwords match
+                            </p>
+                        )}
+                    </div>
+
+                    <button
+                        type="submit"
+                        disabled={loading}
+                        className={`w-full py-3 px-4 rounded-lg font-medium flex items-center justify-center gap-2 transition-all ${
+                            loading
+                                ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                                : 'bg-blue-600 text-white hover:bg-blue-700 hover:shadow-lg'
+                        }`}
+                    >
+                        {loading ? (
+                            <>
+                                <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>
+                                Creating account...
+                            </>
+                        ) : (
+                            <>
+                                <UserPlus size={18} />
+                                Sign Up
+                            </>
+                        )}
+                    </button>
+                </form>
+
+                {/* Login Link */}
+                <p className="mt-6 text-center text-gray-600">
+                    Already have an account?{' '}
+                    <Link to="/login" className="text-blue-600 hover:text-blue-700 font-medium">
+                        Sign in
+                    </Link>
+                </p>
+            </div>
+        </div>
+    );
+}
 
