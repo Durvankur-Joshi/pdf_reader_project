@@ -4,6 +4,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Form
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, List
 from datetime import datetime
+import uvicorn
 import logging
 
 from app.auth import router as auth_router, get_current_user_id
@@ -355,3 +356,10 @@ async def health_check():
         "timestamp": datetime.utcnow(),
     }
 
+
+logger = logging.getLogger(__name__)
+
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", 8000))
+    logger.info(f"Starting server on port {port}")
+    uvicorn.run(app, host="0.0.0.0", port=port)
