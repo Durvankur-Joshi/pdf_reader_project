@@ -1,7 +1,12 @@
 Directory structure:
 └── pdf_reader_project/
+    ├── README.md
     ├── Backend/
+    │   ├── gunicorn.conf.py
+    │   ├── pyproject.toml
+    │   ├── render.yaml
     │   ├── requirements.txt
+    │   ├── runtime.txt
     │   ├── app/
     │   │   ├── auth.py
     │   │   ├── auth_config.py
@@ -44,31 +49,106 @@ Directory structure:
                 └── Signup.jsx
 
 ================================================
+FILE: README.md
+================================================
+AI Document Chat
+
+A RAG based application where users upload documents and ask questions.
+
+Tech Stack:
+Python
+LangChain
+FAISS
+OpenAI
+React
+Node.js
+
+Features:
+â€¢ Document upload
+â€¢ Semantic search
+â€¢ AI answer generation
+â€¢ Chat history
+
+
+================================================
+FILE: Backend/gunicorn.conf.py
+================================================
+
+workers = 4
+worker_class = "uvicorn.workers.UvicornWorker"
+bind = "0.0.0.0:8000"
+timeout = 120
+
+
+================================================
+FILE: Backend/pyproject.toml
+================================================
+# pyproject.toml
+[build-system]
+requires = ["setuptools", "wheel", "cython"]
+build-backend = "setuptools.build_meta"
+
+
+================================================
+FILE: Backend/render.yaml
+================================================
+# Backend/render.yaml
+services:
+  - type: web
+    name: pdf-ai-assistant-backend
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: MONGO_URI
+        sync: false
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: SECRET_KEY
+        generateValue: true
+      - key: ALGORITHM
+        value: HS256
+      - key: ACCESS_TOKEN_EXPIRE_MINUTES
+        value: 30
+
+
+================================================
 FILE: Backend/requirements.txt
 ================================================
-fastapi==0.104.1
-uvicorn==0.24.0
-python-multipart==0.0.6
-langchain==0.1.0
-langchain-community==0.0.10
-langchain-google-genai==0.0.5
-google-generativeai==0.3.0
-pypdf==3.17.4
-faiss-cpu==1.7.4
-python-dotenv==1.0.0
-langchain-huggingface==0.0.3
-tiktoken==0.5.1
-passlib[argon2]==1.7.4
-python-jose[cryptography]==3.3.0
-pymongo==4.5.0
-argon2-cffi==23.1.0
-pypdf2==3.0.1
-python-docx==1.1.0
-openpyxl==3.1.2
-pandas==2.1.3
-python-pptx==0.6.23
-pillow==10.1.0
-pytesseract==0.3.10
+# Backend/requirements.txt
+fastapi
+uvicorn
+gunicorn
+python-multipart
+langchain
+langchain-community
+langchain-google-genai
+google-generativeai
+sentence-transformers
+pypdf
+pandas     
+faiss-cpu
+python-dotenv
+langchain-huggingface
+tiktoken
+passlib[argon2]
+email-validator
+python-jose[cryptography]
+pymongo
+argon2-cffi
+pypdf2
+python-docx
+openpyxl
+python-pptx
+pillow
+pytesseract
+# gridfs is NOT a package - remove it
+
+
+================================================
+FILE: Backend/runtime.txt
+================================================
+python-3.11.9
 
 
 ================================================
@@ -874,6 +954,8 @@ def ingest_pdf_from_bytes(pdf_bytes, filename, user_id):
 ================================================
 FILE: Backend/app/main.py
 ================================================
+import os
+
 from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Form
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, List
@@ -898,10 +980,11 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="PDF AI Assistant API")
 
-# Configure CORS
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -1007,6 +1090,94 @@ async def delete_session(session_id: str, user_id: str = Depends(get_current_use
     if not success:
         raise HTTPException(status_code=404, detail="Session not found")
     return {"message": "Session deleted successfully"}
+
+    # Add these endpoints to Backend/app/main.py
+
+@app.get("/sessions/{session_id}/messages")
+async def get_session_messages(
+    session_id: str,
+    user_id: str = Depends(get_current_user_id)
+):
+    """Get all messages for a session"""
+    from app.mongo_db import messages_collection
+    
+    messages = list(messages_collection.find(
+        {"session_id": session_id}
+    ).sort("timestamp", 1))
+    
+    return {
+        "messages": [
+            {
+                "id": str(msg["_id"]),
+                "role": msg["role"],
+                "content": msg["content"],
+                "timestamp": msg["timestamp"],
+                "sources": msg.get("sources", [])
+            }
+            for msg in messages
+        ]
+    }
+
+@app.put("/sessions/{session_id}")
+async def update_session(
+    session_id: str,
+    title: str,
+    user_id: str = Depends(get_current_user_id)
+):
+    """Update session title"""
+    from app.mongo_db import sessions_collection
+    
+    result = sessions_collection.update_one(
+        {"session_id": session_id, "user_id": user_id},
+        {"$set": {"title": title}}
+    )
+    
+    if result.modified_count == 0:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    return {"message": "Session updated successfully"}
+
+@app.delete("/sessions/{session_id}/messages/{message_id}")
+async def delete_message(
+    session_id: str,
+    message_id: str,
+    user_id: str = Depends(get_current_user_id)
+):
+    """Delete a specific message"""
+    from app.mongo_db import messages_collection
+    from bson import ObjectId
+    
+    result = messages_collection.delete_one({
+        "_id": ObjectId(message_id),
+        "session_id": session_id
+    })
+    
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Message not found")
+    
+    return {"message": "Message deleted successfully"}
+
+@app.get("/bookmarks")
+async def get_bookmarks(user_id: str = Depends(get_current_user_id)):
+    """Get all bookmarked messages"""
+    from app.mongo_db import messages_collection
+    
+    messages = list(messages_collection.find({
+        "user_id": user_id,
+        "bookmarked": True
+    }).sort("timestamp", -1))
+    
+    return {
+        "bookmarks": [
+            {
+                "id": str(msg["_id"]),
+                "content": msg["content"],
+                "session_id": msg["session_id"],
+                "timestamp": msg["timestamp"]
+            }
+            for msg in messages
+        ]
+    }
 
 
 # ==================== Chat Endpoints ====================
@@ -1722,7 +1893,7 @@ FILE: Frontend/src/App.css
 ================================================
 FILE: Frontend/src/App.jsx
 ================================================
-Error reading file with 'cp1252': 'charmap' codec can't decode byte 0x9d in position 5195: character maps to <undefined>
+Error reading file with 'cp1252': 'charmap' codec can't decode byte 0x9d in position 7894: character maps to <undefined>
 
 
 ================================================
@@ -1735,46 +1906,144 @@ FILE: Frontend/src/index.css
     @apply antialiased;
     overflow: hidden;
   }
+
+  /* Dark mode styles */
+  .dark {
+    color-scheme: dark;
+  }
+
+  /* Custom scrollbar */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  ::-webkit-scrollbar-track {
+    @apply bg-gray-100 dark:bg-gray-800;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply bg-gray-300 dark:bg-gray-600 rounded-full;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-gray-400 dark:bg-gray-500;
+  }
 }
 
 @layer components {
-  /* Custom scrollbar */
-  .overflow-y-auto::-webkit-scrollbar {
-    width: 8px;
-  }
-
-  .overflow-y-auto::-webkit-scrollbar-track {
-    @apply bg-gray-100;
-  }
-
-  .overflow-y-auto::-webkit-scrollbar-thumb {
-    @apply bg-gray-300 rounded-full;
-  }
-
-  .overflow-y-auto::-webkit-scrollbar-thumb:hover {
-    @apply bg-gray-400;
-  }
-
   /* Message animations */
   .message-enter {
-    opacity: 0;
-    transform: translateY(20px);
+    animation: slideIn 0.3s ease-out;
   }
 
-  .message-enter-active {
-    opacity: 1;
-    transform: translateY(0);
-    transition: opacity 300ms, transform 300ms;
+  @keyframes slideIn {
+    from {
+      opacity: 0;
+      transform: translateY(20px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  /* Typing indicator animation */
+  .animate-bounce {
+    animation: bounce 1s infinite;
+  }
+
+  @keyframes bounce {
+    0%, 60%, 100% {
+      transform: translateY(0);
+    }
+    30% {
+      transform: translateY(-10px);
+    }
+  }
+
+  /* Pulse animation for recording */
+  .animate-pulse {
+    animation: pulse 2s infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.5;
+    }
+  }
+
+  /* Markdown styles */
+  .prose {
+    @apply text-gray-800 dark:text-gray-200;
+  }
+
+  .prose h1 {
+    @apply text-2xl font-bold mb-4;
+  }
+
+  .prose h2 {
+    @apply text-xl font-bold mb-3;
+  }
+
+  .prose h3 {
+    @apply text-lg font-bold mb-2;
+  }
+
+  .prose p {
+    @apply mb-2;
+  }
+
+  .prose ul {
+    @apply list-disc list-inside mb-2;
+  }
+
+  .prose ol {
+    @apply list-decimal list-inside mb-2;
+  }
+
+  .prose code {
+    @apply bg-gray-100 dark:bg-gray-700 px-1 py-0.5 rounded text-sm;
+  }
+
+  .prose pre {
+    @apply bg-gray-100 dark:bg-gray-700 p-3 rounded-lg overflow-x-auto mb-2;
+  }
+
+  .prose blockquote {
+    @apply border-l-4 border-gray-300 dark:border-gray-600 pl-4 italic;
+  }
+
+  .prose a {
+    @apply text-blue-600 dark:text-blue-400 hover:underline;
   }
 
   /* File upload preview */
   .file-preview {
-    @apply bg-gray-50 rounded-lg p-2;
+    @apply bg-gray-50 dark:bg-gray-800 rounded-lg p-2;
   }
 
   /* Loading spinner */
   .loading-spinner {
-    @apply animate-spin rounded-full border-2 border-gray-300 border-t-blue-600;
+    @apply animate-spin rounded-full border-2 border-gray-300 dark:border-gray-600 border-t-blue-600 dark:border-t-blue-400;
+  }
+
+  /* Tooltip */
+  .tooltip {
+    @apply absolute -top-8 left-1/2 transform -translate-x-1/2 bg-gray-800 text-white text-xs py-1 px-2 rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none;
+  }
+
+  /* Gradient text */
+  .gradient-text {
+    @apply bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent;
+  }
+
+  /* Glass effect */
+  .glass {
+    @apply bg-white/80 dark:bg-gray-900/80 backdrop-blur-lg;
   }
 }
 
@@ -1921,6 +2190,16 @@ export const createSession = async (title = null) => {
     }
 };
 
+export const updateSession = async (sessionId, title) => {
+    try {
+        const response = await API.put(`/sessions/${sessionId}`, { title });
+        return response.data;
+    } catch (error) {
+        console.error('Failed to update session:', error);
+        throw error;
+    }
+};
+
 export const deleteSession = async (sessionId) => {
     try {
         const response = await API.delete(`/sessions/${sessionId}`);
@@ -1941,6 +2220,58 @@ export const sendMessage = async (sessionId, message, files = []) => {
         return response.data;
     } catch (error) {
         console.error('Failed to send message:', error);
+        throw error;
+    }
+};
+
+export const getMessages = async (sessionId) => {
+    try {
+        const response = await API.get(`/sessions/${sessionId}/messages`);
+        return response.data;
+    } catch (error) {
+        console.error('Failed to get messages:', error);
+        throw error;
+    }
+};
+
+export const deleteMessage = async (sessionId, messageId) => {
+    try {
+        const response = await API.delete(`/sessions/${sessionId}/messages/${messageId}`);
+        return response.data;
+    } catch (error) {
+        console.error('Failed to delete message:', error);
+        throw error;
+    }
+};
+
+export const editMessage = async (sessionId, messageId, content) => {
+    try {
+        const response = await API.put(`/sessions/${sessionId}/messages/${messageId}`, {
+            content
+        });
+        return response.data;
+    } catch (error) {
+        console.error('Failed to edit message:', error);
+        throw error;
+    }
+};
+
+export const bookmarkMessage = async (sessionId, messageId) => {
+    try {
+        const response = await API.post(`/sessions/${sessionId}/messages/${messageId}/bookmark`);
+        return response.data;
+    } catch (error) {
+        console.error('Failed to bookmark message:', error);
+        throw error;
+    }
+};
+
+export const getBookmarkedMessages = async () => {
+    try {
+        const response = await API.get('/bookmarks');
+        return response.data;
+    } catch (error) {
+        console.error('Failed to get bookmarks:', error);
         throw error;
     }
 };
