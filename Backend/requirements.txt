@@ -13,6 +13,7 @@ python-dotenv
 langchain-huggingface
 tiktoken
 passlib[argon2]
+email-validator
 python-jose[cryptography]
 pymongo
 argon2-cffi
