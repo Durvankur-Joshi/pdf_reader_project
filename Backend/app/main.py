@@ -25,6 +25,26 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="PDF AI Assistant API")
 
+@app.on_event("startup")
+async def startup_event():
+    logger.info("="*50)
+    logger.info("APPLICATION STARTING UP")
+    logger.info(f"Python version: {os.sys.version}")
+    logger.info(f"PORT env var: {os.getenv('PORT')}")
+    logger.info("="*50)
+    
+    # Test MongoDB connection
+    try:
+        from app.mongo_db import client
+        client.admin.command('ping')
+        logger.info("✅ MongoDB connection successful")
+    except Exception as e:
+        logger.error(f"❌ MongoDB connection failed: {e}")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    logger.info("Application shutting down")
+
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",")
 
 app.add_middleware(
