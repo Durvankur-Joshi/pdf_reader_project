@@ -8,6 +8,7 @@ langchain-community
 langchain-google-genai
 google-generativeai
 pypdf
+pandas     
 faiss-cpu
 python-dotenv
 langchain-huggingface
