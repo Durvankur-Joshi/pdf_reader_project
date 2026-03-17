@@ -4,7 +4,7 @@ services:
     runtime: python
     rootDir: Backend
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn -k uvicorn.workers.UvicornWorker app.main:app --bind 0.0.0.0:$PORT
+    startCommand: startCommand: gunicorn -k uvicorn.workers.UvicornWorker app.main:app --bind 0.0.0.0:$PORT --log-level debug
     envVars:
       - key: MONGO_URI
         sync: false
