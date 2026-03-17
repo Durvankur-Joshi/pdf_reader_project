@@ -1,28 +1,35 @@
-# Backend/requirements.txt
 fastapi
 uvicorn
 gunicorn
 python-multipart
+
 langchain
 langchain-community
 langchain-google-genai
-google-generativeai
-sentence-transformers
-pypdf
-pandas     
-faiss-cpu
-python-dotenv
 langchain-huggingface
+
+google-generativeai
 tiktoken
+
+sentence-transformers
+faiss-cpu
+
+pypdf
+pandas
+
+python-dotenv
+
 passlib[argon2]
 email-validator
 python-jose[cryptography]
-pymongo
 argon2-cffi
-pypdf2
+
+pymongo
+
 python-docx
 openpyxl
 python-pptx
 pillow
 pytesseract
-# gridfs is NOT a package - remove it
+
+torch --index-url https://download.pytorch.org/whl/cpu
