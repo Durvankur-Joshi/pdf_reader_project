@@ -378,8 +378,3 @@ async def health_check():
 
 
 logger = logging.getLogger(__name__)
-
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8000))
-    logger.info(f"Starting server on port {port}")
-    uvicorn.run(app, host="0.0.0.0", port=port)
