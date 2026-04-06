@@ -33,45 +33,22 @@ def search_documents(
         
         # MongoDB vector search pipeline WITHOUT filter first (using post-filtering)
         pipeline = [
-            {
-                "$vectorSearch": {
-                    "index": "vector_index",
-                    "path": "embedding",
-                    "queryVector": query_vector,
-                    "numCandidates": 100,
-                    "limit": limit * 5  # Request more candidates since we'll filter later
-                }
-            },
-            # Then filter the results by user_id
-            {
-                "$match": {
-                    "user_id": user_id
-                }
-            },
-            # Add session_id filter if provided
-            *([{
-                "$match": {
-                    "session_id": session_id
-                }
-            }] if session_id else []),
-            # Add files filter if provided
-            *([{
-                "$match": {
-                    "file": {"$in": files}
-                }
-            }] if files else []),
-            {
-                "$project": {
-                    "text": 1,
-                    "metadata": 1,
-                    "file": 1,
-                    "file_type": 1,
-                    "score": {"$meta": "vectorSearchScore"}
-                }
-            },
-            {
-                "$limit": limit  # Final limit after filtering
-            }
+        {
+        "$vectorSearch": {
+            "index": "vector_index",
+            "path": "embedding",
+            "queryVector": query_vector,
+            "numCandidates": 100,
+            "limit": 5
+         }
+        },
+        {
+        "$project": {
+            "text": 1,
+            "file": 1,
+            "score": {"$meta": "vectorSearchScore"}
+          }
+         }
         ]
         
         # Execute search

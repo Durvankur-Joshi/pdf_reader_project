@@ -18,6 +18,7 @@ from app.models import (
     ChatSessionResponse,
     MessageRole,
 )
+from app.mongo_db import files_collection
 
 # ==================== Logging ====================
 logging.basicConfig(level=logging.INFO)
@@ -118,7 +119,30 @@ async def upload_file(
     except Exception as e:
         logger.error(f"Upload failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+    
+    # ========================== files ===============================
+@app.get("/files")
+async def get_files(
+    session_id: Optional[str] = None,
+    user_id: str = Depends(get_current_user_id)
+):
+    query = {"user_id": user_id}
+    if session_id:
+        query["session_id"] = session_id
 
+    files = list(files_collection.find(query))
+
+    # 🔥 FIX ALL Mongo types
+    for file in files:
+        file["_id"] = str(file["_id"])
+        
+        if "file_id" in file:
+            file["file_id"] = str(file["file_id"])
+        
+        if "upload_date" in file:
+            file["upload_date"] = file["upload_date"].isoformat()
+
+    return {"files": files}
 # ==================== Sessions ====================
 @app.post("/sessions", response_model=ChatSessionResponse)
 async def create_session(

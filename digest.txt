@@ -1,13 +1,14 @@
 Directory structure:
 └── pdf_reader_project/
     ├── README.md
+    ├── render.yaml
     ├── Backend/
     │   ├── gunicorn.conf.py
     │   ├── pyproject.toml
-    │   ├── render.yaml
     │   ├── requirements.txt
     │   ├── runtime.txt
     │   ├── app/
+    │   │   ├── __init__.py
     │   │   ├── auth.py
     │   │   ├── auth_config.py
     │   │   ├── auth_models.py
@@ -72,6 +73,29 @@ Features:
 
 
 ================================================
+FILE: render.yaml
+================================================
+services:
+  - type: web
+    name: pdf-ai-assistant-backend
+    runtime: python
+    rootDir: Backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: MONGO_URI
+        sync: false
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: SECRET_KEY
+        generateValue: true
+      - key: ALGORITHM
+        value: HS256
+      - key: ACCESS_TOKEN_EXPIRE_MINUTES
+        value: 30
+
+
+================================================
 FILE: Backend/gunicorn.conf.py
 ================================================
 
@@ -91,65 +115,55 @@ build-backend = "setuptools.build_meta"
 
 
 ================================================
-FILE: Backend/render.yaml
-================================================
-# Backend/render.yaml
-services:
-  - type: web
-    name: pdf-ai-assistant-backend
-    runtime: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
-    envVars:
-      - key: MONGO_URI
-        sync: false
-      - key: GOOGLE_API_KEY
-        sync: false
-      - key: SECRET_KEY
-        generateValue: true
-      - key: ALGORITHM
-        value: HS256
-      - key: ACCESS_TOKEN_EXPIRE_MINUTES
-        value: 30
-
-
-================================================
 FILE: Backend/requirements.txt
 ================================================
-# Backend/requirements.txt
 fastapi
 uvicorn
 gunicorn
 python-multipart
+
 langchain
 langchain-community
 langchain-google-genai
-google-generativeai
-sentence-transformers
-pypdf
-pandas     
-faiss-cpu
-python-dotenv
 langchain-huggingface
+
+google-generativeai
 tiktoken
+
+sentence-transformers
+faiss-cpu
+
+pypdf
+pandas
+
+python-dotenv
+
 passlib[argon2]
 email-validator
 python-jose[cryptography]
-pymongo
 argon2-cffi
-pypdf2
+
+pymongo
+
 python-docx
 openpyxl
 python-pptx
 pillow
 pytesseract
-# gridfs is NOT a package - remove it
+
+torch --index-url https://download.pytorch.org/whl/cpu
 
 
 ================================================
 FILE: Backend/runtime.txt
 ================================================
 python-3.10.16
+
+
+================================================
+FILE: Backend/app/__init__.py
+================================================
+[Empty file]
 
 
 ================================================
