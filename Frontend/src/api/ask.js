@@ -1,9 +1,10 @@
 import API from "./api";
 
-export const askQuestion = async (question) => {
+export const askQuestion = async (question , sessionId) => {
     try {
         const res = await API.post('/ask', {
-            question: question
+            question: question,
+            session_id: sessionId
         });
         
         // Validate response structure

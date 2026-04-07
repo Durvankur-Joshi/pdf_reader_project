@@ -18,7 +18,7 @@ from app.models import (
     ChatSessionResponse,
     MessageRole,
 )
-from app.mongo_db import files_collection
+from app.mongo_db import files_collection , collection,fs
 
 # ==================== Logging ====================
 logging.basicConfig(level=logging.INFO)
@@ -192,7 +192,49 @@ async def get_messages(session_id: str):
             for msg in messages
         ]
     }
+# ==================== Delete file ==============
 
+@app.delete("/files/{filename}")
+async def delete_file(filename: str, user_id: str = Depends(get_current_user_id)):
+    """Delete a file and all its related data"""
+
+    try:
+        # 1️⃣ Delete document chunks (RAG data)
+        delete_result = collection.delete_many({
+            "file": filename,
+            "user_id": user_id
+        })
+
+        # 2️⃣ Find file in files_collection
+        file_doc = files_collection.find_one({
+            "filename": filename,
+            "user_id": user_id
+        })
+
+        if not file_doc:
+            raise HTTPException(status_code=404, detail="File not found")
+
+        # 3️⃣ Delete from GridFS
+        file_id = file_doc.get("file_id")
+        if file_id:
+            try:
+                fs.delete(file_id)
+            except Exception:
+                pass  # ignore if already deleted
+
+        # 4️⃣ Delete metadata
+        files_collection.delete_one({
+            "filename": filename,
+            "user_id": user_id
+        })
+
+        return {
+            "message": "File deleted successfully",
+            "deleted_chunks": delete_result.deleted_count
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 # ==================== Chat ====================
 @app.post("/chat")
 async def chat(request: ChatRequest, user_id: str = Depends(get_current_user_id)):

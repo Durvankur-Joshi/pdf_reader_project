@@ -63,6 +63,11 @@ async def ask_question(
             session_id=session_id,
             files=files
         )
+        if not session_id:
+         return {
+           "answer": "Session ID missing. Please start a chat session.",
+          "sources": []
+        }
         
         if not docs:
             logger.warning("No relevant documents found")

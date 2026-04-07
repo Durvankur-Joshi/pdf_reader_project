@@ -39,15 +39,21 @@ def search_documents(
             "path": "embedding",
             "queryVector": query_vector,
             "numCandidates": 100,
-            "limit": 5
+            "limit": 5,
+            "filter": {
+               "user_id": user_id,  
+               "session_id":session_id                  
+            }
          }
         },
         {
         "$project": {
-            "text": 1,
-            "file": 1,
-            "score": {"$meta": "vectorSearchScore"}
-          }
+              "text": 1,
+             "file": 1,
+             "file_type": 1,
+             "metadata": 1,
+             "score": {"$meta": "vectorSearchScore"}
+            }
          }
         ]
         

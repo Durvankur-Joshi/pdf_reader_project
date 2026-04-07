@@ -1,10 +1,11 @@
 Directory structure:
 └── pdf_reader_project/
     ├── README.md
-    ├── render.yaml
+    ├── Project Documentation.docx
     ├── Backend/
     │   ├── gunicorn.conf.py
     │   ├── pyproject.toml
+    │   ├── render.yaml
     │   ├── requirements.txt
     │   ├── runtime.txt
     │   ├── app/
@@ -73,26 +74,9 @@ Features:
 
 
 ================================================
-FILE: render.yaml
+FILE: Project Documentation.docx
 ================================================
-services:
-  - type: web
-    name: pdf-ai-assistant-backend
-    runtime: python
-    rootDir: Backend
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
-    envVars:
-      - key: MONGO_URI
-        sync: false
-      - key: GOOGLE_API_KEY
-        sync: false
-      - key: SECRET_KEY
-        generateValue: true
-      - key: ALGORITHM
-        value: HS256
-      - key: ACCESS_TOKEN_EXPIRE_MINUTES
-        value: 30
+[Binary file]
 
 
 ================================================
@@ -112,6 +96,29 @@ FILE: Backend/pyproject.toml
 [build-system]
 requires = ["setuptools", "wheel", "cython"]
 build-backend = "setuptools.build_meta"
+
+
+================================================
+FILE: Backend/render.yaml
+================================================
+services:
+  - type: web
+    name: pdf-ai-assistant-backend
+    runtime: python3
+    rootDir: Backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: MONGO_URI
+        sync: false
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: SECRET_KEY
+        generateValue: true
+      - key: ALGORITHM
+        value: HS256
+      - key: ACCESS_TOKEN_EXPIRE_MINUTES
+        value: 30
 
 
 ================================================
@@ -969,7 +976,7 @@ def ingest_pdf_from_bytes(pdf_bytes, filename, user_id):
 ================================================
 FILE: Backend/app/main.py
 ================================================
-Error reading file with 'cp1252': 'charmap' codec can't decode byte 0x9d in position 1213: character maps to <undefined>
+Error reading file with 'cp1252': 'charmap' codec can't decode byte 0x9d in position 1398: character maps to <undefined>
 
 
 ================================================
@@ -1181,6 +1188,11 @@ async def ask_question(
             session_id=session_id,
             files=files
         )
+        if not session_id:
+         return {
+           "answer": "Session ID missing. Please start a chat session.",
+          "sources": []
+        }
         
         if not docs:
             logger.warning("No relevant documents found")
@@ -1309,45 +1321,28 @@ def search_documents(
         
         # MongoDB vector search pipeline WITHOUT filter first (using post-filtering)
         pipeline = [
-            {
-                "$vectorSearch": {
-                    "index": "vector_index",
-                    "path": "embedding",
-                    "queryVector": query_vector,
-                    "numCandidates": 100,
-                    "limit": limit * 5  # Request more candidates since we'll filter later
-                }
-            },
-            # Then filter the results by user_id
-            {
-                "$match": {
-                    "user_id": user_id
-                }
-            },
-            # Add session_id filter if provided
-            *([{
-                "$match": {
-                    "session_id": session_id
-                }
-            }] if session_id else []),
-            # Add files filter if provided
-            *([{
-                "$match": {
-                    "file": {"$in": files}
-                }
-            }] if files else []),
-            {
-                "$project": {
-                    "text": 1,
-                    "metadata": 1,
-                    "file": 1,
-                    "file_type": 1,
-                    "score": {"$meta": "vectorSearchScore"}
-                }
-            },
-            {
-                "$limit": limit  # Final limit after filtering
+        {
+        "$vectorSearch": {
+            "index": "vector_index",
+            "path": "embedding",
+            "queryVector": query_vector,
+            "numCandidates": 100,
+            "limit": 5,
+            "filter": {
+               "user_id": user_id,  
+               "session_id":session_id                  
             }
+         }
+        },
+        {
+        "$project": {
+              "text": 1,
+             "file": 1,
+             "file_type": 1,
+             "metadata": 1,
+             "score": {"$meta": "vectorSearchScore"}
+            }
+         }
         ]
         
         # Execute search
@@ -1809,10 +1804,11 @@ FILE: Frontend/src/api/ask.js
 ================================================
 import API from "./api";
 
-export const askQuestion = async (question) => {
+export const askQuestion = async (question , sessionId) => {
     try {
         const res = await API.post('/ask', {
-            question: question
+            question: question,
+            session_id: sessionId
         });
         
         // Validate response structure
