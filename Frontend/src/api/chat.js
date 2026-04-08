@@ -1,3 +1,4 @@
+// Frontend/src/api/chat.js
 import API from "./api";
 
 export const getSessions = async () => {

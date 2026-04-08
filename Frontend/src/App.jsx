@@ -1,54 +1,55 @@
-import { useState, useEffect, useRef } from "react";
-import { useAuth } from "./context/AuthContext";
-import { uploadFile } from "./api/upload";
-import { sendMessage, getSessions, createSession, getSession, deleteSession } from "./api/chat";
-import { getUserFiles, deleteFile } from "./api/upload";
+// Frontend/src/App.jsx
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { useAuth } from './context/AuthContext';
+import { uploadFile, deleteFile, getUserFiles } from './api/upload';
+import { createSession, getSessions, getSession, deleteSession, sendMessage, updateSession } from './api/chat';
 import ReactMarkdown from 'react-markdown';
-import {
-  Send,
-  Plus,
-  Menu,
-  FileText,
-  Image as ImageIcon,
-  File,
+import { 
+  Send, 
+  FileText, 
+  Trash2, 
+  Plus, 
+  Menu, 
+  X, 
+  Loader2,
+  Bot,
+  User,
+  Paperclip,
   Sparkles,
   MessageSquare,
-  Trash2,
-  ChevronLeft,
-  ChevronRight,
-  Loader,
-  Paperclip,
-  X,
-  Copy,
-  Check,
-  Download,
-  Clock,
   Settings,
-  LogOut,
-  User,
+  Sun,
+  Moon,
+  CheckCircle2,
+  AlertCircle,
+  Copy,
+  ThumbsUp,
+  ThumbsDown,
+  ExternalLink,
+  Clock,
   FolderOpen,
   Search,
-  Filter,
-  MoreVertical,
-  Edit,
-  Archive,
-  AlertCircle,
-  CheckCircle,
+  Edit2,
+  Save,
+  Database,
   Upload,
-  FileUp,
+  File,
+  Image,
+  FileSpreadsheet,
+  FileArchive,
+  HardDrive,
+  LogOut,
+  ChevronLeft,
+  ChevronRight,
+  Check,
+  Bookmark,
+  BookmarkPlus,
+  Share2,
+  Zap,
+  Shield,
   Mic,
   StopCircle,
   Volume2,
-  ThumbsUp,
-  ThumbsDown,
-  Share2,
-  Bookmark,
-  BookmarkPlus,
-  Zap,
-  Globe,
-  Lock,
-  Moon,
-  Sun,
   Maximize2,
   Minimize2
 } from 'lucide-react';
@@ -73,24 +74,46 @@ function App() {
   const [userFiles, setUserFiles] = useState([]);
   const [darkMode, setDarkMode] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
-  const [editingMessage, setEditingMessage] = useState(null);
+  const [showThemeMenu, setShowThemeMenu] = useState(false);
   const [feedback, setFeedback] = useState({});
   const [bookmarkedMessages, setBookmarkedMessages] = useState([]);
   const [voiceMode, setVoiceMode] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
+  const [editingSessionId, setEditingSessionId] = useState(null);
+  const [editingTitle, setEditingTitle] = useState('');
+  const [initialLoading, setInitialLoading] = useState(true);
   
   const messagesEndRef = useRef(null);
   const fileInputRef = useRef(null);
   const chatContainerRef = useRef(null);
   const inputRef = useRef(null);
   const fileManagerRef = useRef(null);
+  const themeMenuRef = useRef(null);
 
-  // Load sessions on mount
+  // Load sessions and theme on mount
   useEffect(() => {
-    loadSessions();
+    const savedTheme = localStorage.getItem('theme');
+    const savedSessionId = localStorage.getItem('currentSessionId');
+    
+    // Apply dark mode class to html element
+    if (savedTheme === 'dark') {
+      setDarkMode(true);
+      document.documentElement.classList.add('dark');
+    } else {
+      setDarkMode(false);
+      document.documentElement.classList.remove('dark');
+    }
+    
+    loadSessions(savedSessionId);
     loadUserFiles();
   }, []);
+
+  // Save current session to localStorage
+  useEffect(() => {
+    if (currentSession?.session_id) {
+      localStorage.setItem('currentSessionId', currentSession.session_id);
+    }
+  }, [currentSession]);
 
   // Scroll to bottom when messages change
   useEffect(() => {
@@ -105,42 +128,59 @@ function App() {
     }
   }, [input]);
 
-  // Handle click outside file manager
+  // Handle click outside theme menu
   useEffect(() => {
     function handleClickOutside(event) {
       if (fileManagerRef.current && !fileManagerRef.current.contains(event.target)) {
         setShowFileManager(false);
       }
+      if (themeMenuRef.current && !themeMenuRef.current.contains(event.target) && showThemeMenu) {
+        setShowThemeMenu(false);
+      }
     }
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, []);
+  }, [showThemeMenu]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
 
-  const loadSessions = async () => {
+  const loadSessions = async (savedSessionId = null) => {
     try {
+      setInitialLoading(true);
       const data = await getSessions();
-      setSessions(data.sessions || []);
+      // Handle both array and object responses
+      const sessionsArray = Array.isArray(data) ? data : (data.sessions || []);
+      setSessions(sessionsArray);
       
-      if (data.sessions && data.sessions.length > 0) {
-        loadSession(data.sessions[0].session_id);
+      if (sessionsArray.length > 0) {
+        // Try to load saved session first, otherwise load most recent
+        let sessionToLoad = savedSessionId;
+        if (!sessionToLoad || !sessionsArray.find(s => s.session_id === sessionToLoad)) {
+          sessionToLoad = sessionsArray[0].session_id;
+        }
+        await loadSession(sessionToLoad);
       } else {
-        createNewSession();
+        await createNewSession();
       }
     } catch (error) {
       console.error("Failed to load sessions:", error);
+      setSessions([]);
+      await createNewSession();
+    } finally {
+      setInitialLoading(false);
     }
   };
 
   const loadUserFiles = async () => {
     try {
       const data = await getUserFiles();
-      setUserFiles(data.files || []);
+      const filesArray = Array.isArray(data) ? data : (data.files || []);
+      setUserFiles(filesArray);
     } catch (error) {
       console.error("Failed to load files:", error);
+      setUserFiles([]);
     }
   };
 
@@ -161,6 +201,7 @@ function App() {
       setCurrentSession(newSession);
       setMessages([]);
       setSelectedFiles([]);
+      localStorage.setItem('currentSessionId', newSession.session_id);
     } catch (error) {
       console.error("Failed to create session:", error);
     }
@@ -171,18 +212,37 @@ function App() {
     if (window.confirm('Are you sure you want to delete this session?')) {
       try {
         await deleteSession(sessionId);
-        setSessions(prev => prev.filter(s => s.session_id !== sessionId));
+        const updatedSessions = sessions.filter(s => s.session_id !== sessionId);
+        setSessions(updatedSessions);
+        
         if (currentSession?.session_id === sessionId) {
-          if (sessions.length > 1) {
-            const nextSession = sessions.find(s => s.session_id !== sessionId);
-            loadSession(nextSession.session_id);
+          if (updatedSessions.length > 0) {
+            await loadSession(updatedSessions[0].session_id);
           } else {
-            createNewSession();
+            await createNewSession();
           }
         }
       } catch (error) {
         console.error("Failed to delete session:", error);
       }
+    }
+  };
+
+  const handleRenameSession = async (sessionId, newTitle) => {
+    if (!newTitle.trim()) return;
+    try {
+      await updateSession(sessionId, newTitle);
+      const updatedSessions = sessions.map(s => 
+        s.session_id === sessionId ? { ...s, title: newTitle } : s
+      );
+      setSessions(updatedSessions);
+      if (currentSession?.session_id === sessionId) {
+        setCurrentSession(prev => ({ ...prev, title: newTitle }));
+      }
+      setEditingSessionId(null);
+      setEditingTitle('');
+    } catch (error) {
+      console.error("Failed to rename session:", error);
     }
   };
 
@@ -217,8 +277,8 @@ function App() {
       }]);
 
       setSelectedFiles([]);
-      loadSessions();
-      loadUserFiles();
+      await loadSessions(); // Refresh sessions to update message counts
+      await loadUserFiles(); // Refresh files
       
     } catch (error) {
       console.error("Failed to send message:", error);
@@ -261,40 +321,79 @@ function App() {
 
     setUploading(true);
     
-    for (const file of selectedFiles) {
+    // Upload files in parallel for better performance
+    const uploadPromises = selectedFiles.map(async (file) => {
       try {
         setUploadProgress(prev => ({ ...prev, [file.name]: 0 }));
         
-        const response = await uploadFile(
-          file,
-          currentSession?.session_id
-        );
+        const response = await uploadFile(file, currentSession?.session_id);
         
         setUploadProgress(prev => ({ ...prev, [file.name]: 100 }));
         
-        setMessages(prev => [...prev, {
-          role: "system",
-          content: `✅ Uploaded ${file.name}`,
-          timestamp: new Date(),
-          id: Date.now().toString()
-        }]);
-        
+        return { file, response, status: 'success' };
       } catch (error) {
         console.error(`Failed to upload ${file.name}:`, error);
-        setMessages(prev => [...prev, {
-          role: "system",
-          content: `❌ Failed to upload ${file.name}`,
-          timestamp: new Date(),
-          id: Date.now().toString(),
-          isError: true
-        }]);
+        setUploadProgress(prev => ({ ...prev, [file.name]: -1 }));
+        return { file, error, status: 'error' };
       }
-    }
+    });
+    
+    const results = await Promise.all(uploadPromises);
+    
+    // Show system messages for upload results
+    const successUploads = results.filter(r => r.status === 'success');
+    const failedUploads = results.filter(r => r.status === 'error');
+    
+    successUploads.forEach(({ file, response }) => {
+      setMessages(prev => [...prev, {
+        role: "system",
+        content: `✅ Uploaded ${file.name} (${response.chunks_stored} chunks processed)`,
+        timestamp: new Date(),
+        id: Date.now().toString()
+      }]);
+    });
+    
+    failedUploads.forEach(({ file }) => {
+      setMessages(prev => [...prev, {
+        role: "system",
+        content: `❌ Failed to upload ${file.name}`,
+        timestamp: new Date(),
+        id: Date.now().toString(),
+        isError: true
+      }]);
+    });
     
     setUploading(false);
     setSelectedFiles([]);
-    setUploadProgress({});
-    loadUserFiles();
+    await loadUserFiles();
+    
+    // Clear progress after 3 seconds
+    setTimeout(() => {
+      setUploadProgress({});
+    }, 3000);
+  };
+
+  const handleDeleteFile = async (filename) => {
+    if (window.confirm(`Delete ${filename}?`)) {
+      try {
+        await deleteFile(filename);
+        await loadUserFiles();
+        setMessages(prev => [...prev, {
+          role: "system",
+          content: `🗑️ Deleted ${filename}`,
+          timestamp: new Date(),
+          id: Date.now().toString()
+        }]);
+      } catch (error) {
+        console.error("Failed to delete file:", error);
+      }
+    }
+  };
+
+  const handleLogout = async () => {
+    await logout();
+    // Redirect to login page
+    window.location.href = '/login';
   };
 
   const copyToClipboard = (text, messageId) => {
@@ -312,12 +411,12 @@ function App() {
 
   const getFileIcon = (filename) => {
     const ext = filename.split('.').pop().toLowerCase();
-    if (['jpg', 'jpeg', 'png', 'gif', 'webp'].includes(ext)) return <ImageIcon className="h-4 w-4" />;
-    if (ext === 'pdf') return <FileText className="h-4 w-4" />;
+    if (['jpg', 'jpeg', 'png', 'gif', 'webp'].includes(ext)) return <Image className="h-4 w-4" />;
+    if (ext === 'pdf') return <FileText className="h-4 w-4 text-red-500" />;
     if (['docx', 'doc'].includes(ext)) return <FileText className="h-4 w-4 text-blue-500" />;
-    if (['xlsx', 'xls', 'csv'].includes(ext)) return <FileText className="h-4 w-4 text-green-500" />;
-    if (['pptx', 'ppt'].includes(ext)) return <FileText className="h-4 w-4 text-orange-500" />;
-    return <File className="h-4 w-4" />;
+    if (['xlsx', 'xls', 'csv'].includes(ext)) return <FileSpreadsheet className="h-4 w-4 text-green-500" />;
+    if (['pptx', 'ppt'].includes(ext)) return <FileArchive className="h-4 w-4 text-orange-500" />;
+    return <File className="h-4 w-4 text-gray-500" />;
   };
 
   const formatTime = (date) => {
@@ -325,17 +424,6 @@ function App() {
       hour: '2-digit',
       minute: '2-digit'
     });
-  };
-
-  const handleDeleteFile = async (filename) => {
-    if (window.confirm(`Delete ${filename}?`)) {
-      try {
-        await deleteFile(filename);
-        loadUserFiles();
-      } catch (error) {
-        console.error("Failed to delete file:", error);
-      }
-    }
   };
 
   const toggleBookmark = (messageId) => {
@@ -353,16 +441,53 @@ function App() {
     }));
   };
 
+  const toggleTheme = () => {
+    const newDarkMode = !darkMode;
+    setDarkMode(newDarkMode);
+    
+    // Apply dark mode class to html element
+    if (newDarkMode) {
+      document.documentElement.classList.add('dark');
+      localStorage.setItem('theme', 'dark');
+    } else {
+      document.documentElement.classList.remove('dark');
+      localStorage.setItem('theme', 'light');
+    }
+    
+    setShowThemeMenu(false);
+  };
+
+  const toggleFullscreen = () => {
+    if (!fullscreen) {
+      document.documentElement.requestFullscreen();
+    } else {
+      document.exitFullscreen();
+    }
+    setFullscreen(!fullscreen);
+    setShowThemeMenu(false);
+  };
+
   const filteredSessions = sessions.filter(session =>
     session.title.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
+  if (initialLoading) {
+    return (
+      <div className="h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900">
+        <div className="text-center">
+          <Loader2 className="h-12 w-12 animate-spin text-blue-600 mx-auto mb-4" />
+          <p className="text-gray-600 dark:text-gray-400">Loading your chats...</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className={`h-screen flex ${darkMode ? 'dark' : ''}`}>
+    <div className="h-screen flex bg-gray-50 dark:bg-gray-900">
       {/* Sidebar */}
-      <div className={`${sidebarOpen ? 'w-80' : 'w-20'} bg-white dark:bg-gray-900 border-r dark:border-gray-800 transition-all duration-300 flex flex-col relative`}>
+      <div className={`${sidebarOpen ? 'w-80' : 'w-20'} bg-white dark:bg-gray-900 border-r border-gray-200 dark:border-gray-800 transition-all duration-300 flex flex-col relative`}>
         {/* Sidebar Header */}
-        <div className="p-4 border-b dark:border-gray-800 flex items-center justify-between">
+        <div className="p-4 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between">
           {sidebarOpen ? (
             <div className="flex items-center gap-2">
               <div className="bg-gradient-to-r from-blue-600 to-purple-600 p-2 rounded-lg">
@@ -379,7 +504,7 @@ function App() {
             onClick={() => setSidebarOpen(!sidebarOpen)}
             className="p-2 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors"
           >
-            {sidebarOpen ? <ChevronLeft size={18} className="dark:text-gray-400" /> : <ChevronRight size={18} className="dark:text-gray-400" />}
+            {sidebarOpen ? <ChevronLeft size={18} className="text-gray-600 dark:text-gray-400" /> : <ChevronRight size={18} className="text-gray-600 dark:text-gray-400" />}
           </button>
         </div>
 
@@ -393,7 +518,7 @@ function App() {
                 placeholder="Search sessions..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full pl-9 pr-4 py-2 bg-gray-100 dark:bg-gray-800 rounded-lg text-sm dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full pl-9 pr-4 py-2 bg-gray-100 dark:bg-gray-800 rounded-lg text-sm text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
             </div>
           </div>
@@ -414,78 +539,129 @@ function App() {
 
         {/* Sessions List */}
         <div className="flex-1 overflow-y-auto px-2">
-          {filteredSessions.map((session) => (
-            <div
-              key={session.session_id}
-              onClick={() => loadSession(session.session_id)}
-              className={`group relative p-3 mb-1 rounded-lg cursor-pointer transition-all ${
-                currentSession?.session_id === session.session_id
-                  ? 'bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-600'
-                  : 'hover:bg-gray-50 dark:hover:bg-gray-800'
-              }`}
-            >
-              {sidebarOpen ? (
-                <div className="flex items-start gap-3">
-                  <div className={`p-2 rounded-lg ${
-                    currentSession?.session_id === session.session_id
-                      ? 'bg-blue-100 dark:bg-blue-800'
-                      : 'bg-gray-100 dark:bg-gray-700'
-                  }`}>
-                    <MessageSquare className={`h-4 w-4 ${
+          {filteredSessions.length === 0 ? (
+            <div className="text-center py-8 text-gray-500 dark:text-gray-400">
+              <MessageSquare className="h-12 w-12 mx-auto mb-3 opacity-50" />
+              <p className="text-sm">No chats yet</p>
+              <p className="text-xs">Start a new conversation</p>
+            </div>
+          ) : (
+            filteredSessions.map((session) => (
+              <div
+                key={session.session_id}
+                onClick={() => loadSession(session.session_id)}
+                className={`group relative p-3 mb-1 rounded-lg cursor-pointer transition-all ${
+                  currentSession?.session_id === session.session_id
+                    ? 'bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-600'
+                    : 'hover:bg-gray-50 dark:hover:bg-gray-800'
+                }`}
+              >
+                {sidebarOpen ? (
+                  <div className="flex items-start gap-3">
+                    <div className={`p-2 rounded-lg ${
                       currentSession?.session_id === session.session_id
-                        ? 'text-blue-600 dark:text-blue-300'
-                        : 'text-gray-600 dark:text-gray-400'
-                    }`} />
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="font-medium text-gray-800 dark:text-white truncate flex items-center gap-2">
-                      {session.title}
-                      {session.message_count > 0 && (
-                        <span className="text-xs bg-gray-200 dark:bg-gray-700 px-1.5 py-0.5 rounded-full">
-                          {session.message_count}
-                        </span>
+                        ? 'bg-blue-100 dark:bg-blue-800'
+                        : 'bg-gray-100 dark:bg-gray-700'
+                    }`}>
+                      <MessageSquare className={`h-4 w-4 ${
+                        currentSession?.session_id === session.session_id
+                          ? 'text-blue-600 dark:text-blue-300'
+                          : 'text-gray-600 dark:text-gray-400'
+                      }`} />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      {editingSessionId === session.session_id ? (
+                        <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                          <input
+                            type="text"
+                            value={editingTitle}
+                            onChange={(e) => setEditingTitle(e.target.value)}
+                            onKeyPress={(e) => {
+                              if (e.key === 'Enter') {
+                                handleRenameSession(session.session_id, editingTitle);
+                              }
+                            }}
+                            className="flex-1 px-2 py-1 text-sm border rounded focus:ring-2 focus:ring-blue-500 bg-white dark:bg-gray-800 text-gray-900 dark:text-white"
+                            autoFocus
+                          />
+                          <button
+                            onClick={() => handleRenameSession(session.session_id, editingTitle)}
+                            className="p-1 rounded hover:bg-green-100 dark:hover:bg-green-900/30"
+                          >
+                            <Save className="h-4 w-4 text-green-600" />
+                          </button>
+                          <button
+                            onClick={() => setEditingSessionId(null)}
+                            className="p-1 rounded hover:bg-red-100 dark:hover:bg-red-900/30"
+                          >
+                            <X className="h-4 w-4 text-red-600" />
+                          </button>
+                        </div>
+                      ) : (
+                        <>
+                          <div className="font-medium text-gray-800 dark:text-white truncate flex items-center gap-2">
+                            {session.title}
+                            {session.message_count > 0 && (
+                              <span className="text-xs bg-gray-200 dark:bg-gray-700 px-1.5 py-0.5 rounded-full text-gray-700 dark:text-gray-300">
+                                {session.message_count}
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-xs text-gray-500 dark:text-gray-400 mt-1 flex items-center gap-2">
+                            <Clock className="h-3 w-3" />
+                            {new Date(session.updated_at).toLocaleDateString()}
+                          </div>
+                        </>
                       )}
                     </div>
-                    <div className="text-xs text-gray-500 dark:text-gray-400 mt-1 flex items-center gap-2">
-                      <Clock className="h-3 w-3" />
-                      {new Date(session.updated_at).toLocaleDateString()}
+                    <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-all">
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setEditingSessionId(session.session_id);
+                          setEditingTitle(session.title);
+                        }}
+                        className="p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700"
+                      >
+                        <Edit2 className="h-3 w-3 text-gray-500 dark:text-gray-400" />
+                      </button>
+                      <button
+                        onClick={(e) => handleDeleteSession(session.session_id, e)}
+                        className="p-1 rounded hover:bg-red-100 dark:hover:bg-red-900/30"
+                      >
+                        <Trash2 className="h-3 w-3 text-red-500" />
+                      </button>
                     </div>
                   </div>
-                  <button
-                    onClick={(e) => handleDeleteSession(session.session_id, e)}
-                    className="opacity-0 group-hover:opacity-100 p-1 hover:bg-red-100 dark:hover:bg-red-900 rounded transition-opacity"
-                  >
-                    <Trash2 className="h-4 w-4 text-red-500" />
-                  </button>
-                </div>
-              ) : (
-                <div className="relative flex justify-center">
-                  <div className={`p-2 rounded-lg ${
-                    currentSession?.session_id === session.session_id
-                      ? 'bg-blue-100 dark:bg-blue-800'
-                      : 'bg-gray-100 dark:bg-gray-700'
-                  }`}>
-                    <MessageSquare className={`h-5 w-5 ${
+                ) : (
+                  <div className="relative flex justify-center">
+                    <div className={`p-2 rounded-lg ${
                       currentSession?.session_id === session.session_id
-                        ? 'text-blue-600 dark:text-blue-300'
-                        : 'text-gray-600 dark:text-gray-400'
-                    }`} />
+                        ? 'bg-blue-100 dark:bg-blue-800'
+                        : 'bg-gray-100 dark:bg-gray-700'
+                    }`}>
+                      <MessageSquare className={`h-5 w-5 ${
+                        currentSession?.session_id === session.session_id
+                          ? 'text-blue-600 dark:text-blue-300'
+                          : 'text-gray-600 dark:text-gray-400'
+                      }`} />
+                    </div>
+                    {session.message_count > 0 && (
+                      <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full h-4 w-4 flex items-center justify-center">
+                        {session.message_count}
+                      </span>
+                    )}
                   </div>
-                  {session.message_count > 0 && (
-                    <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full h-4 w-4 flex items-center justify-center">
-                      {session.message_count}
-                    </span>
-                  )}
-                </div>
-              )}
-            </div>
-          ))}
+                )}
+              </div>
+            ))
+          )}
         </div>
 
-        {/* User Profile Section */}
-        <div className={`border-t dark:border-gray-800 p-4 ${sidebarOpen ? '' : 'text-center'}`}>
+        {/* User Profile Section with Theme Toggle and Logout */}
+        <div className={`border-t border-gray-200 dark:border-gray-800 p-4 ${sidebarOpen ? '' : 'text-center'}`}>
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 bg-gradient-to-r from-blue-600 to-purple-600 rounded-full flex items-center justify-center">
+            <div className="w-8 h-8 bg-gradient-to-r from-blue-600 to-purple-600 rounded-full flex items-center justify-center flex-shrink-0">
               <User className="h-4 w-4 text-white" />
             </div>
             {sidebarOpen && (
@@ -498,50 +674,79 @@ function App() {
                     Online
                   </div>
                 </div>
-                <button
-                  onClick={() => setShowSettings(!showSettings)}
-                  className="p-2 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors"
-                >
-                  <Settings className="h-4 w-4 text-gray-600 dark:text-gray-400" />
-                </button>
+                <div className="flex items-center gap-1">
+                  {/* Theme Toggle Button */}
+                  <div className="relative">
+                    <button
+                      onClick={() => setShowThemeMenu(!showThemeMenu)}
+                      className="p-2 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors"
+                      title="Theme settings"
+                    >
+                      {darkMode ? <Sun className="h-4 w-4 text-gray-600 dark:text-gray-400" /> : <Moon className="h-4 w-4 text-gray-600 dark:text-gray-400" />}
+                    </button>
+                    
+                    {/* Theme Menu Dropdown */}
+                    {showThemeMenu && (
+                      <div 
+                        ref={themeMenuRef}
+                        className="absolute bottom-full right-0 mb-2 w-48 bg-white dark:bg-gray-800 rounded-lg shadow-xl border border-gray-200 dark:border-gray-700 p-2 z-10"
+                      >
+                        <button
+                          onClick={toggleTheme}
+                          className="w-full px-3 py-2 text-left hover:bg-gray-100 dark:hover:bg-gray-700 rounded flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300"
+                        >
+                          {darkMode ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+                          {darkMode ? 'Light Mode' : 'Dark Mode'}
+                        </button>
+                        <button
+                          onClick={toggleFullscreen}
+                          className="w-full px-3 py-2 text-left hover:bg-gray-100 dark:hover:bg-gray-700 rounded flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300"
+                        >
+                          <Maximize2 className="h-4 w-4" />
+                          Fullscreen
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                  
+                  {/* Logout Button */}
+                  <button
+                    onClick={handleLogout}
+                    className="p-2 hover:bg-red-100 dark:hover:bg-red-900/30 rounded-lg transition-colors group"
+                    title="Logout"
+                  >
+                    <LogOut className="h-4 w-4 text-red-600" />
+                  </button>
+                </div>
               </>
             )}
           </div>
+          {!sidebarOpen && (
+            <div className="mt-3 flex flex-col gap-2">
+              <button
+                onClick={toggleTheme}
+                className="p-2 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors mx-auto"
+                title={darkMode ? 'Light Mode' : 'Dark Mode'}
+              >
+                {darkMode ? <Sun className="h-4 w-4 text-gray-600 dark:text-gray-400" /> : <Moon className="h-4 w-4 text-gray-600 dark:text-gray-400" />}
+              </button>
+              <button
+                onClick={handleLogout}
+                className="p-2 hover:bg-red-100 dark:hover:bg-red-900/30 rounded-lg transition-colors mx-auto"
+                title="Logout"
+              >
+                <LogOut className="h-4 w-4 text-red-600" />
+              </button>
+            </div>
+          )}
         </div>
-
-        {/* Settings Dropdown */}
-        {showSettings && sidebarOpen && (
-          <div className="absolute bottom-20 left-4 right-4 bg-white dark:bg-gray-800 rounded-lg shadow-xl border dark:border-gray-700 p-2 z-10">
-            <button
-              onClick={() => setDarkMode(!darkMode)}
-              className="w-full px-3 py-2 text-left hover:bg-gray-100 dark:hover:bg-gray-700 rounded flex items-center gap-2 text-sm"
-            >
-              {darkMode ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-              {darkMode ? 'Light Mode' : 'Dark Mode'}
-            </button>
-            <button
-              onClick={() => setFullscreen(!fullscreen)}
-              className="w-full px-3 py-2 text-left hover:bg-gray-100 dark:hover:bg-gray-700 rounded flex items-center gap-2 text-sm"
-            >
-              {fullscreen ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
-              {fullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
-            </button>
-            <button
-              onClick={logout}
-              className="w-full px-3 py-2 text-left hover:bg-red-50 dark:hover:bg-red-900/20 rounded flex items-center gap-2 text-sm text-red-600"
-            >
-              <LogOut className="h-4 w-4" />
-              Logout
-            </button>
-          </div>
-        )}
       </div>
 
       {/* Main Chat Area */}
       <div className="flex-1 flex flex-col bg-gray-50 dark:bg-gray-950">
         {/* Chat Header */}
         {currentSession && (
-          <div className="bg-white dark:bg-gray-900 border-b dark:border-gray-800 px-6 py-4 flex items-center justify-between">
+          <div className="bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-800 px-6 py-4 flex items-center justify-between">
             <div className="flex items-center gap-3">
               <h1 className="text-xl font-semibold text-gray-800 dark:text-white">
                 {currentSession.title}
@@ -573,10 +778,13 @@ function App() {
         {showFileManager && (
           <div 
             ref={fileManagerRef}
-            className="absolute right-6 top-20 w-96 bg-white dark:bg-gray-800 rounded-lg shadow-xl border dark:border-gray-700 z-20"
+            className="absolute right-6 top-20 w-96 bg-white dark:bg-gray-800 rounded-lg shadow-xl border border-gray-200 dark:border-gray-700 z-20"
           >
-            <div className="p-4 border-b dark:border-gray-700">
-              <h3 className="font-semibold dark:text-white">Your Files</h3>
+            <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center">
+              <h3 className="font-semibold text-gray-800 dark:text-white">Your Files</h3>
+              <button onClick={() => setShowFileManager(false)} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded">
+                <X className="h-4 w-4 text-gray-600 dark:text-gray-400" />
+              </button>
             </div>
             <div className="max-h-96 overflow-y-auto p-2">
               {userFiles.length === 0 ? (
@@ -593,7 +801,7 @@ function App() {
                     <div className="flex items-center gap-3 min-w-0">
                       {getFileIcon(file.filename)}
                       <div className="min-w-0">
-                        <div className="text-sm font-medium dark:text-white truncate">
+                        <div className="text-sm font-medium text-gray-800 dark:text-white truncate">
                           {file.filename}
                         </div>
                         <div className="text-xs text-gray-500 dark:text-gray-400">
@@ -632,15 +840,15 @@ function App() {
                   Upload files and ask questions. I can help you analyze documents, extract information, and more!
                 </p>
                 <div className="grid grid-cols-2 gap-4">
-                  <div className="p-4 bg-white dark:bg-gray-800 rounded-xl border dark:border-gray-700">
+                  <div className="p-4 bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700">
                     <FileText className="h-6 w-6 text-blue-600 mb-2" />
-                    <h3 className="font-medium dark:text-white">Upload Files</h3>
-                    <p className="text-xs text-gray-500">PDF, DOCX, Images</p>
+                    <h3 className="font-medium text-gray-800 dark:text-white">Upload Files</h3>
+                    <p className="text-xs text-gray-500 dark:text-gray-400">PDF, DOCX, Images</p>
                   </div>
-                  <div className="p-4 bg-white dark:bg-gray-800 rounded-xl border dark:border-gray-700">
+                  <div className="p-4 bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700">
                     <MessageSquare className="h-6 w-6 text-purple-600 mb-2" />
-                    <h3 className="font-medium dark:text-white">Ask Questions</h3>
-                    <p className="text-xs text-gray-500">Get instant answers</p>
+                    <h3 className="font-medium text-gray-800 dark:text-white">Ask Questions</h3>
+                    <p className="text-xs text-gray-500 dark:text-gray-400">Get instant answers</p>
                   </div>
                 </div>
               </div>
@@ -650,7 +858,7 @@ function App() {
               {messages.map((msg, idx) => (
                 <div
                   key={idx}
-                  className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} message-enter`}
+                  className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} animate-fadeIn`}
                 >
                   <div
                     className={`max-w-[80%] rounded-2xl p-4 relative group ${
@@ -659,8 +867,8 @@ function App() {
                         : msg.role === 'system'
                         ? msg.isError
                           ? 'bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 text-red-800 dark:text-red-200'
-                          : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400'
-                        : 'bg-white dark:bg-gray-800 border dark:border-gray-700 text-gray-800 dark:text-white'
+                          : 'bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 text-green-800 dark:text-green-200'
+                        : 'bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-gray-800 dark:text-white'
                     }`}
                   >
                     {/* Message Header */}
@@ -675,13 +883,13 @@ function App() {
 
                     {/* Message Content with Markdown support for assistant messages */}
                     {msg.role === 'assistant' ? (
-                      <div className="prose dark:prose-invert max-w-none">
+                      <div className="prose dark:prose-invert max-w-none text-sm">
                         <ReactMarkdown>
                           {msg.content}
                         </ReactMarkdown>
                       </div>
                     ) : (
-                      <div className="whitespace-pre-wrap">{msg.content}</div>
+                      <div className="whitespace-pre-wrap text-sm">{msg.content}</div>
                     )}
 
                     {/* Sources */}
@@ -694,13 +902,13 @@ function App() {
                           {msg.sources.map((source, i) => (
                             <div
                               key={i}
-                              className="text-xs bg-gray-100 dark:bg-gray-700 rounded-full px-3 py-1 text-gray-600 dark:text-gray-300 flex items-center gap-1 hover:bg-gray-200 dark:hover:bg-gray-600 cursor-pointer transition-colors"
+                              className="text-xs bg-gray-100 dark:bg-gray-700 rounded-full px-3 py-1 text-gray-600 dark:text-gray-300 flex items-center gap-1"
                               title={source.text_snippet}
                             >
                               {getFileIcon(source.file)}
                               <span>{source.file.split('/').pop()}</span>
                               {source.score && (
-                                <span className="text-gray-400 dark:text-gray-500">
+                                <span className="text-gray-400">
                                   ({(source.score * 100).toFixed(0)}%)
                                 </span>
                               )}
@@ -747,9 +955,7 @@ function App() {
                         {bookmarkedMessages.includes(msg.id) ? <Bookmark className="h-3 w-3" /> : <BookmarkPlus className="h-3 w-3" />}
                       </button>
                       {msg.role === 'assistant' && (
-                        <button
-                          className="p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded transition-colors text-gray-600 dark:text-gray-400"
-                        >
+                        <button className="p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded transition-colors text-gray-600 dark:text-gray-400">
                           <Share2 className="h-3 w-3" />
                         </button>
                       )}
@@ -763,11 +969,11 @@ function App() {
           {/* Typing Indicator */}
           {isTyping && (
             <div className="flex justify-start mt-4">
-              <div className="bg-white dark:bg-gray-800 border dark:border-gray-700 rounded-2xl p-4">
+              <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-2xl p-4">
                 <div className="flex gap-1">
-                  <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
-                  <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
-                  <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
+                  <div className="w-2 h-2 bg-gray-400 rounded-full typing-dot"></div>
+                  <div className="w-2 h-2 bg-gray-400 rounded-full typing-dot" style={{ animationDelay: '0.2s' }}></div>
+                  <div className="w-2 h-2 bg-gray-400 rounded-full typing-dot" style={{ animationDelay: '0.4s' }}></div>
                 </div>
               </div>
             </div>
@@ -777,10 +983,10 @@ function App() {
 
         {/* Selected Files Preview */}
         {selectedFiles.length > 0 && (
-          <div className="bg-white dark:bg-gray-900 border-t dark:border-gray-800 px-6 py-3">
+          <div className="bg-white dark:bg-gray-900 border-t border-gray-200 dark:border-gray-800 px-6 py-3">
             <div className="flex items-center justify-between mb-2">
               <span className="text-sm font-medium text-gray-700 dark:text-gray-300 flex items-center gap-2">
-                <FileUp className="h-4 w-4" />
+                <Upload className="h-4 w-4" />
                 Files to upload ({selectedFiles.length})
               </span>
               <button
@@ -788,7 +994,7 @@ function App() {
                 disabled={uploading}
                 className="text-xs bg-gradient-to-r from-blue-600 to-purple-600 text-white px-3 py-1 rounded hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
               >
-                {uploading ? <Loader className="animate-spin h-3 w-3" /> : <Upload className="h-3 w-3" />}
+                {uploading ? <Loader2 className="animate-spin h-3 w-3" /> : <Upload className="h-3 w-3" />}
                 Upload All
               </button>
             </div>
@@ -800,7 +1006,7 @@ function App() {
                 >
                   {getFileIcon(file.name)}
                   <div>
-                    <div className="font-medium dark:text-white max-w-[200px] truncate">
+                    <div className="font-medium text-gray-800 dark:text-white max-w-[200px] truncate">
                       {file.name}
                     </div>
                     <div className="text-xs text-gray-500 dark:text-gray-400">
@@ -808,7 +1014,9 @@ function App() {
                     </div>
                   </div>
                   {uploadProgress[file.name] === 100 ? (
-                    <CheckCircle className="h-4 w-4 text-green-600" />
+                    <CheckCircle2 className="h-4 w-4 text-green-600" />
+                  ) : uploadProgress[file.name] === -1 ? (
+                    <AlertCircle className="h-4 w-4 text-red-600" />
                   ) : (
                     <button
                       onClick={() => removeFile(idx)}
@@ -831,7 +1039,7 @@ function App() {
         )}
 
         {/* Input Area */}
-        <div className="bg-white dark:bg-gray-900 border-t dark:border-gray-800 px-6 py-4">
+        <div className="bg-white dark:bg-gray-900 border-t border-gray-200 dark:border-gray-800 px-6 py-4">
           <div className="flex items-end gap-4 max-w-4xl mx-auto">
             <div className="flex-1 relative">
               <textarea
@@ -845,7 +1053,7 @@ function App() {
                   }
                 }}
                 placeholder="Ask anything... (Shift+Enter for new line)"
-                className="w-full px-4 py-3 bg-gray-100 dark:bg-gray-800 border-0 rounded-lg focus:ring-2 focus:ring-blue-500 resize-none max-h-[200px] dark:text-white placeholder-gray-500"
+                className="w-full px-4 py-3 bg-gray-100 dark:bg-gray-800 border-0 rounded-lg focus:ring-2 focus:ring-blue-500 resize-none max-h-[200px] text-gray-900 dark:text-white placeholder-gray-500"
                 rows="1"
               />
               <div className="absolute right-3 bottom-3 text-xs text-gray-400">
@@ -890,7 +1098,7 @@ function App() {
                 className="px-6 py-3 bg-gradient-to-r from-blue-600 to-purple-600 text-white rounded-lg hover:opacity-90 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 group relative"
               >
                 {loading ? (
-                  <Loader className="animate-spin h-5 w-5" />
+                  <Loader2 className="animate-spin h-5 w-5" />
                 ) : (
                   <>
                     <Send className="h-5 w-5 group-hover:translate-x-1 transition-transform" />
@@ -912,6 +1120,36 @@ function App() {
           </div>
         </div>
       </div>
+
+      <style>{`
+        @keyframes fadeIn {
+          from {
+            opacity: 0;
+            transform: translateY(10px);
+          }
+          to {
+            opacity: 1;
+            transform: translateY(0);
+          }
+        }
+        
+        .animate-fadeIn {
+          animation: fadeIn 0.3s ease-out;
+        }
+        
+        .typing-dot {
+          animation: bounce 1.4s infinite ease-in-out;
+        }
+        
+        @keyframes bounce {
+          0%, 60%, 100% {
+            transform: translateY(0);
+          }
+          30% {
+            transform: translateY(-6px);
+          }
+        }
+      `}</style>
     </div>
   );
 }

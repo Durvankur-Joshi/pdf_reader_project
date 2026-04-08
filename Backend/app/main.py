@@ -4,7 +4,7 @@ import logging
 from datetime import datetime
 from typing import Optional, List
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Form
+from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Form , Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.auth import router as auth_router, get_current_user_id
@@ -121,24 +121,27 @@ async def upload_file(
         raise HTTPException(status_code=500, detail=str(e))
     
     # ========================== files ===============================
+
 @app.get("/files")
 async def get_files(
-    session_id: Optional[str] = None,
+    session_id: Optional[str] = Query(None),
     user_id: str = Depends(get_current_user_id)
 ):
     query = {"user_id": user_id}
-    if session_id:
+
+    # 🔥 FIX: explicit check
+    if session_id is not None and session_id != "":
         query["session_id"] = session_id
 
     files = list(files_collection.find(query))
 
-    # 🔥 FIX ALL Mongo types
+    # Convert Mongo types
     for file in files:
         file["_id"] = str(file["_id"])
-        
+
         if "file_id" in file:
             file["file_id"] = str(file["file_id"])
-        
+
         if "upload_date" in file:
             file["upload_date"] = file["upload_date"].isoformat()
 
